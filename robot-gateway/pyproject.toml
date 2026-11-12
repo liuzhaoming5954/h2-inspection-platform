@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "h2-robot-gateway"
+version = "0.1.0"
+description = "Simulated gRPC robot gateway for H2 platform technical validation"
+requires-python = ">=3.12"
+dependencies = ["grpcio>=1.85,<2", "protobuf>=7.35.1,<8"]
+
+[project.optional-dependencies]
+dev = ["grpcio-tools>=1.85,<2", "pytest>=8,<10"]
+
+[project.scripts]
+h2-robot-gateway = "h2_gateway.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

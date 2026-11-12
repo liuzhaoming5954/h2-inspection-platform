@@ -1,0 +1,5 @@
+-e ./robot-gateway[dev]
+-e ./backend[test]
+onnxruntime>=1.20,<2
+onnx>=1.17,<2
+opencv-python-headless>=4.10,<6

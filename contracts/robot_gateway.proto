@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package h2.gateway.v1;
+
+// Local validation simulator. This contract does not claim hardware support.
+service RobotGateway {
+  rpc GetState(Empty) returns (RobotState);
+  rpc StartTask(StartTaskRequest) returns (CommandReply);
+  rpc StopTask(StopTaskRequest) returns (CommandReply);
+  rpc GetTask(TaskQuery) returns (TaskResult);
+  rpc TeleopAcquire(Empty) returns (TeleopReply);
+  rpc TeleopCommand(TeleopCommandRequest) returns (TeleopReply);
+  rpc TeleopRelease(TeleopReleaseRequest) returns (TeleopReply);
+}
+
+message Empty {}
+
+message Point {
+  string id = 1;
+  string label = 2;
+  double x = 3;
+  double y = 4;
+}
+
+message StartTaskRequest {
+  string task_id = 1;
+  string command_id = 2;
+  int64 expires_at_ms = 3;
+  repeated Point points = 4;
+}
+
+message StopTaskRequest {
+  string task_id = 1;
+  string command_id = 2;
+  int64 expires_at_ms = 3;
+}
+
+message TaskQuery { string task_id = 1; }
+
+message CommandReply {
+  bool accepted = 1;
+  string code = 2;
+  string message = 3;
+  string task_id = 4;
+  string command_id = 5;
+  bool simulated = 6;
+}
+
+message Pose {
+  double x = 1;
+  double y = 2;
+  // Radians in the simulation plane: +x at zero, positive towards +y.
+  double yaw = 3;
+}
+
+message RobotState {
+  string robot_id = 1;
+  string status = 2;
+  string task_id = 3;
+  double progress = 4;
+  int64 sequence = 5;
+  double battery_percent = 6;
+  Pose pose = 7;
+  bool simulated = 8;
+  int64 start_count = 9;
+  string task_status = 10;
+  string updated_at = 11;
+  bool teleop_active = 12;
+  string motion = 13;
+}
+
+message TeleopCommandRequest {
+  string token = 1;
+  int64 sequence = 2;
+  string action = 3;
+  int64 expires_at_ms = 4;
+}
+
+message TeleopReleaseRequest { string token = 1; }
+
+message TeleopReply {
+  bool accepted = 1;
+  string code = 2;
+  string message = 3;
+  string token = 4;
+}
+
+message Sample {
+  string point_id = 1;
+  string label = 2;
+  string device_id = 3;
+  double temperature_c = 4;
+  double humidity_percent = 5;
+  bytes image_png = 6;
+  string captured_at = 7;
+  bool simulated = 8;
+  double x = 9;
+  double y = 10;
+}
+
+message TaskResult {
+  string task_id = 1;
+  string status = 2;
+  double progress = 3;
+  repeated Sample samples = 4;
+  string reason = 5;
+  bool simulated = 6;
+  int64 sequence = 7;
+  string updated_at = 8;
+}
