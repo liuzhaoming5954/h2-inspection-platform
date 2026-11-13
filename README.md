@@ -35,7 +35,7 @@ pnpm --dir frontend install --frozen-lockfile
 
 ## H2 真机遥控
 
-真机模式使用宇树 SDK2。启动器使用独立 SQLite 数据库。SDK 安装、只读探测和现场验收步骤见 [H2 真机遥控现场联调](robot-gateway/H2_COMMISSIONING.md)。本机回环测试覆盖方向指令、停步请求和会话断开。实际动作和停稳需现场验收。
+真机模式在 H2 的 PC3 运行宇树 SDK2 网关。x86 上位机经 SSH 本地转发连接，并用 `--external-gateway 127.0.0.1:15051` 启动前端和后端。启动器使用独立 SQLite 数据库。SDK 安装、只读探测和现场验收步骤见 [H2 真机遥控现场联调](robot-gateway/H2_COMMISSIONING.md)。本机回环测试覆盖方向指令、停步请求和会话断开。实际动作和停稳需现场验收。
 
 ## 运行验证
 

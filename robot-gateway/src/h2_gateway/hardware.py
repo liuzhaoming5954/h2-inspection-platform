@@ -220,10 +220,13 @@ class H2HardwareGateway:
             if sequence <= self._sequence:
                 return teleop_reply(False, "stale_sequence", "teleop sequence must strictly increase")
             remaining_ms = expires_at_ms - time.time_ns() // 1_000_000
-            if remaining_ms > MAX_COMMAND_FUTURE_MS:
-                return teleop_reply(False, "invalid_expiry", "teleop deadline is too far in the future")
-            if remaining_ms <= 0 and action != "stop":
-                return teleop_reply(False, "expired", "teleop command has expired")
+            # An ordered stop from the current owner must survive clock skew
+            # between the workstation and PC3. Direction/heartbeat still expire.
+            if action != "stop":
+                if remaining_ms > MAX_COMMAND_FUTURE_MS:
+                    return teleop_reply(False, "invalid_expiry", "teleop deadline is too far in the future")
+                if remaining_ms <= 0:
+                    return teleop_reply(False, "expired", "teleop command has expired")
             self._sequence = sequence
             self._lease_until = now + LEASE_SECONDS
             if action == "heartbeat":

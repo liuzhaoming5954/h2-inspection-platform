@@ -106,6 +106,42 @@ def test_wrong_fsm_or_offline_does_not_enable_movement(hardware):
     assert loco.commands.empty()
 
 
+def test_clock_skew_never_blocks_an_ordered_stop_from_the_owner(hardware):
+    gateway, loco = hardware
+    token = gateway.teleop_acquire()["token"]
+    assert send(gateway, token, 1, "forward")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    assert send(gateway, token, 2, "forward", ttl=1200)["code"] == "invalid_expiry"
+    assert send(gateway, "wrong-token", 2, "stop", ttl=1200)["code"] == "invalid_token"
+    assert send(gateway, token, 1, "stop", ttl=1200)["code"] == "stale_sequence"
+    assert send(gateway, token, 2, "stop", ttl=1200)["code"] == "stopped"
+    assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
+
+
+def test_controller_link_loss_latches_unconfirmed_stop(hardware):
+    gateway, loco = hardware
+    state_before_loss = gateway.get_state()["updated_at"]
+    token = gateway.teleop_acquire()["token"]
+    assert send(gateway, token, 1, "forward")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    loco.reject_motion.set()
+    loco.reject_stop.set()
+    loco.state = None
+    assert send(gateway, token, 2, "stop")["code"] == "stop_unconfirmed"
+    state = wait_for(gateway, lambda state: state["status"] == "fault")
+    assert not state["teleop_active"]
+    assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
+
+    loco.state = (601, 0)
+    loco.reject_motion.clear()
+    loco.reject_stop.clear()
+    state = wait_for(gateway, lambda state: state.get("fsm_mode") == 0 and state["updated_at"] != state_before_loss)
+    assert state["status"] == "fault" and not state["teleop_ready"]
+    assert gateway.teleop_acquire()["code"] == "stop_unconfirmed"
+    assert not send(gateway, token, 3, "forward")["accepted"]
+    assert loco.commands.empty()
+
+
 def test_shutdown_requests_zero_and_gateway_refuses_nonlocal_bind(hardware):
     gateway, loco = hardware
     with pytest.raises(ValueError, match="loopback"):

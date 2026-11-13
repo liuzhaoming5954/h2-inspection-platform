@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_address
 from typing import Any
 
 import grpc
@@ -22,9 +23,16 @@ def teleop_dict(reply: pb.TeleopReply) -> dict[str, Any]:
 class GatewayClient:
     def __init__(self, target: str = "127.0.0.1:50051", timeout: float = 3):
         self.timeout = timeout
-        self.channel = grpc.insecure_channel(target, options=[
-            ("grpc.max_receive_message_length", 32 * 1024 * 1024),
-        ])
+        options = [("grpc.max_receive_message_length", 32 * 1024 * 1024)]
+        host, separator, _ = target.rpartition(":")
+        if separator:
+            try:
+                if ip_address(host.strip("[]")).is_loopback:
+                    # Local SSH forwarding must take precedence over an environment proxy.
+                    options.append(("grpc.enable_http_proxy", 0))
+            except ValueError:
+                pass
+        self.channel = grpc.insecure_channel(target, options=options)
         self.stub = rpc.RobotGatewayStub(self.channel)
 
     def get_state(self) -> dict[str, Any]:
