@@ -35,7 +35,7 @@ pnpm --dir frontend install --frozen-lockfile
 
 ## H2 真机遥控
 
-真机模式使用宇树 SDK2。启动器使用独立 SQLite 数据库。本机回环测试覆盖方向指令、停步请求和会话断开。实际动作和停稳需现场验收。
+真机模式使用宇树 SDK2。启动器使用独立 SQLite 数据库。SDK 安装、只读探测和现场验收步骤见 [H2 真机遥控现场联调](robot-gateway/H2_COMMISSIONING.md)。本机回环测试覆盖方向指令、停步请求和会话断开。实际动作和停稳需现场验收。
 
 ## 运行验证
 
