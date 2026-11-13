@@ -61,17 +61,19 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await asyncio.to_thread(service.initialize)
-        worker = asyncio.create_task(maintain())
+        worker = None if settings.hardware_teleop else asyncio.create_task(maintain())
         try:
             yield
         finally:
-            worker.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker
+            if worker is not None:
+                worker.cancel()
+                with suppress(asyncio.CancelledError):
+                    await worker
             await asyncio.to_thread(service.close)
 
     app = FastAPI(title="H2巡检技术验证 API", version="0.1.0", lifespan=lifespan,
-                  description="Local validation only. All robot readings and images are simulated. Authentication is not implemented in this prototype.")
+                  description="Local validation API. Inspection readings and images are simulated. "
+                  "H2 hardware teleoperation requires an explicit local hardware configuration.")
     app.state.service = service
     app.add_middleware(CORSMiddleware,
                        allow_origins=list(UI_ORIGINS),
@@ -132,13 +134,13 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
                     state = await asyncio.to_thread(service.robot)
                     await websocket.send_json({"type": "robot_state", "data": state})
                 except ServiceError:
-                    await websocket.send_json({"type": "gateway_unavailable", "simulated": True})
+                    await websocket.send_json({"type": "gateway_unavailable", "simulated": not settings.hardware_teleop})
                 await asyncio.sleep(1)
         except WebSocketDisconnect:
             pass
 
     @app.websocket("/api/teleop/ws")
     async def teleop_websocket(websocket: WebSocket):
-        await teleop_socket(websocket, service.gateway)
+        await teleop_socket(websocket, service.gateway, hardware_teleop=settings.hardware_teleop)
 
     return app

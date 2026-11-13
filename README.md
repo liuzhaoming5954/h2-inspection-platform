@@ -1,12 +1,12 @@
 # H2 巡检上位机
 
-面向 x86_64 Ubuntu 24.04 的巡检与遥控技术验证项目。当前使用模拟机器人和合成传感数据，可在本机运行完整的巡检、人工复核、报告导出和遥控流程。
+面向 x86_64 Ubuntu 24.04 的巡检与遥控技术验证项目。默认用模拟机器人和合成数据运行巡检、人工复核、报告导出和遥控流程。H2 真机模式支持前进、后退、左右转向和停步。
 
 | 目录 | 内容 |
 | --- | --- |
 | `frontend/` | Vue 3、TypeScript、Element Plus、Three.js、ECharts 验证台 |
 | `backend/` | FastAPI 业务 API、PostgreSQL 持久化、复核与 PDF、Excel、JSON 导出 |
-| `robot-gateway/` | gRPC 模拟机器人网关、巡检和遥控执行 |
+| `robot-gateway/` | gRPC 网关、模拟巡检和宇树 SDK2 高层遥控 |
 | `contracts/` | 网关 Protobuf 接口定义 |
 | `scripts/` | 本地开发启动与验证脚本 |
 
@@ -32,6 +32,10 @@ pnpm --dir frontend install --frozen-lockfile
 .venv/bin/python scripts/dev.py stop
 .venv/bin/python scripts/manage_postgres.py stop
 ```
+
+## H2 真机遥控
+
+真机模式使用宇树 SDK2。启动器使用独立 SQLite 数据库。本机回环测试覆盖方向指令、停步请求和会话断开。实际动作和停稳需现场验收。
 
 ## 运行验证
 

@@ -41,6 +41,7 @@ export interface RobotState {
   battery_percent?: number
   battery?: number
   connected?: boolean
+  connection_status?: string
   task_id?: string
   progress?: number
   sequence?: number
@@ -50,8 +51,16 @@ export interface RobotState {
   pose?: { x?: number; y?: number; yaw?: number }
   position?: { x?: number; y?: number; yaw?: number }
   teleop_active?: boolean
-  motion?: 'stop' | 'forward' | 'backward' | 'turn_left' | 'turn_right'
+  teleop_ready?: boolean
+  fsm_id?: number | null
+  fsm_mode?: number | null
+  motion?: 'stop' | 'forward' | 'backward' | 'turn_left' | 'turn_right' | 'stop_requested' | 'unknown'
   simulated?: boolean
+}
+
+export interface ServiceHealth {
+  status?: string
+  hardware_teleop?: boolean
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {

@@ -31,11 +31,15 @@ class GatewayClient:
         state = self.stub.GetState(pb.Empty(), timeout=self.timeout)
         return {"robot_id": state.robot_id, "status": state.status,
                 "task_id": state.task_id, "progress": state.progress,
-                "sequence": state.sequence, "battery_percent": state.battery_percent,
-                "pose": {"x": state.pose.x, "y": state.pose.y, "yaw": state.pose.yaw}, "simulated": state.simulated,
+                "sequence": state.sequence, "battery_percent": state.battery_percent if state.simulated else None,
+                "pose": {"x": state.pose.x, "y": state.pose.y, "yaw": state.pose.yaw} if state.HasField("pose") else None,
+                "simulated": state.simulated,
                 "start_count": state.start_count, "task_status": state.task_status,
                 "updated_at": state.updated_at, "teleop_active": state.teleop_active,
-                "motion": state.motion or "stop"}
+                "motion": state.motion or ("stop" if state.simulated else "unknown"),
+                "teleop_ready": state.teleop_ready,
+                "fsm_id": state.fsm_id if state.HasField("fsm_id") else None,
+                "fsm_mode": state.fsm_mode if state.HasField("fsm_mode") else None}
 
     def teleop_acquire(self) -> dict[str, Any]:
         return teleop_dict(self.stub.TeleopAcquire(pb.Empty(), timeout=min(self.timeout, 0.75)))

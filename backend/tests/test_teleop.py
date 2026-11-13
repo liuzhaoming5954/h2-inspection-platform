@@ -1,11 +1,14 @@
+from dataclasses import replace
 import time
 from threading import Event
 
 from fastapi import WebSocketDisconnect
+from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
 
-from h2_backend.models import Outbox
+from h2_backend.app import create_app
+from h2_backend.models import Base, Outbox, Task
 
 
 PATH = "ws://127.0.0.1:8000/api/teleop/ws"
@@ -29,6 +32,7 @@ class TeleopBoundary:
         self.state = gateway.get_state
         self.start = gateway.start_task
         self.simulated = True
+        self.ready = None
         self.active = False
         self.motion = "stop"
         self.acquires = 0
@@ -36,6 +40,7 @@ class TeleopBoundary:
         self.releases = []
         self.released = Event()
         self.timeout_at = None
+        self.command_failure = None
 
     @staticmethod
     def response(accepted, code):
@@ -44,8 +49,9 @@ class TeleopBoundary:
 
     def get_state(self):
         state = self.state()
-        return {**state, "status": "teleop" if self.active else state["status"],
-                "simulated": self.simulated, "teleop_active": self.active, "motion": self.motion,
+        status = state["status"] if self.simulated else "ready"
+        return {**state, "status": "teleop" if self.active else status,
+                "simulated": self.simulated, "teleop_ready": self.ready, "teleop_active": self.active, "motion": self.motion,
                 "pose": {"x": 1, "y": 2, "yaw": 0.25}}
 
     def acquire(self):
@@ -65,6 +71,8 @@ class TeleopBoundary:
             raise TimeoutError(f"internal details {PRIVATE_TOKEN}")
         if token != PRIVATE_TOKEN or not self.active:
             return self.response(False, "invalid_token")
+        if self.command_failure:
+            return self.response(False, self.command_failure)
         if action == "heartbeat":
             return self.response(True, "renewed")
         self.motion = action
@@ -93,6 +101,92 @@ def teleop(gateway, monkeypatch):
     }.items():
         monkeypatch.setattr(gateway, name, method, raising=False)
     return boundary
+
+
+@pytest.fixture
+def hardware_client(settings, gateway, teleop):
+    teleop.simulated = False
+    teleop.ready = True
+    app = create_app(replace(settings, hardware_teleop=True), gateway)
+    Base.metadata.drop_all(app.state.service.engine)
+    try:
+        with TestClient(app, client=("127.0.0.1", 50000)) as client:
+            yield client
+    finally:
+        Base.metadata.drop_all(app.state.service.engine)
+
+
+@pytest.mark.parametrize("simulated,ready,code", [
+    (True, True, "hardware_required"),
+    (False, None, "robot_not_ready"),
+    (False, False, "robot_not_ready"),
+])
+def test_hardware_lease_requires_ready_hardware(hardware_client, teleop, simulated, ready, code):
+    teleop.simulated = simulated
+    teleop.ready = ready
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        response = socket.receive_json()
+        assert response["code"] == code and not response["accepted"]
+    assert teleop.acquires == 0
+
+
+def test_hardware_rejects_non_loopback_peer_even_with_local_headers(hardware_client, teleop):
+    client = TestClient(hardware_client.app, client=("192.0.2.10", 50000))
+    with pytest.raises(WebSocketDisconnect) as rejected:
+        with client.websocket_connect(PATH, headers=HEADERS):
+            pytest.fail("Hardware teleop accepted a non-loopback peer")
+    assert rejected.value.code == 1008
+    assert teleop.acquires == 0
+
+
+def test_hardware_ack_distinguishes_request_from_measured_motion(hardware_client, teleop):
+    assert hardware_client.get("/api/health").json()["hardware_teleop"] is True
+    assert hardware_client.get("/api/robot").json()["simulated"] is False
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        assert socket.receive_json()["code"] == "acquired"
+        assert send(socket, "forward", 1)["message"] == "H2 已接收运动指令。"
+        stop = send(socket, "stop", 2)
+        assert stop["code"] == "stopped" and stop["message"] == "H2 已接收停步请求。"
+        assert send(socket, "release", 3)["accepted"]
+    assert teleop.releases == [PRIVATE_TOKEN]
+
+
+@pytest.mark.parametrize("code", ["hardware_unavailable", "robot_not_ready", "sdk_rejected", "stop_unconfirmed"])
+def test_hardware_failure_closes_session_and_releases_control(hardware_client, teleop, code):
+    teleop.command_failure = code
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        assert socket.receive_json()["accepted"]
+        failure = send(socket, "stop" if code == "stop_unconfirmed" else "forward", 1)
+        assert failure["code"] == code and not failure["accepted"]
+        assert PRIVATE_TOKEN not in str(failure)
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1008
+        assert teleop.released.wait(1)
+    assert teleop.releases == [PRIVATE_TOKEN]
+
+
+def test_hardware_disables_inspection_and_pending_replay(hardware_client, teleop, payload):
+    service = hardware_client.app.state.service
+    with service.sessions.begin() as session:
+        session.add(Task(id="existing-task", request_id="original", request_hash="hash", name="Original task", points=[]))
+        session.flush()
+        session.add(Outbox(id="existing-command", task_id="existing-task", expires_at_ms=now_ms() + 30000))
+    # Even if a hardware-configured API is pointed at a simulator, it must
+    # neither accept new inspection actions nor replay its old outbox.
+    teleop.simulated = True
+    assert hardware_client.get("/api/robot").status_code == 503
+    assert hardware_client.get("/api/health").json()["gateway"] == "unavailable"
+    assert hardware_client.post("/api/tasks", json=payload).status_code == 409
+    assert hardware_client.post("/api/tasks/existing-task/stop").status_code == 409
+    service.recover_outbox()
+    service.dispatch("existing-task")
+    assert hardware_client.get("/api/tasks/existing-task").json()["status"] == "pending_dispatch"
+    assert hardware_client.get("/api/tasks").json()[0]["id"] == "existing-task"
+    with service.sessions() as session:
+        command = session.get(Outbox, "existing-command")
+        assert command.status == "pending" and command.attempts == 0
+    assert teleop.gateway.starts == 0
 
 
 def test_control_contract_preserves_freshness_and_keeps_token_private(client, teleop):

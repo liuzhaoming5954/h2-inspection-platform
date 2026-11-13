@@ -15,7 +15,7 @@ interface Reply {
   sequence?: number
 }
 
-const props = defineProps<{ disabledReason: string; robot: RobotState | null; telemetryAvailable: boolean }>()
+const props = defineProps<{ disabledReason: string; hardware: boolean; robot: RobotState | null; telemetryAvailable: boolean }>()
 const emit = defineEmits<{ sessionActive: [active: boolean] }>()
 const pad = ref<HTMLDivElement>()
 const panel = ref<HTMLElement>()
@@ -33,15 +33,26 @@ const directionButtons = [
 const directionKeys: Record<string, Direction> = { ArrowUp: 'forward', ArrowDown: 'backward', ArrowLeft: 'turn_left', ArrowRight: 'turn_right' }
 const motionLabels: Record<NonNullable<RobotState['motion']>, string> = {
   stop: '已停步', forward: '前进', backward: '后退', turn_left: '左转', turn_right: '右转',
+  stop_requested: '停步请求已应答', unknown: '未知',
 }
 
 const active = computed(() => phase.value === 'active')
-const occupied = computed(() => props.telemetryAvailable && (props.robot?.teleop_active || props.robot?.status === 'teleop'))
+const canMove = computed(() => active.value && !props.disabledReason)
+const robotState = computed(() => props.telemetryAvailable && (!props.hardware || props.robot?.simulated === false)
+  ? props.robot
+  : null)
+const occupied = computed(() => robotState.value?.teleop_active || robotState.value?.status === 'teleop')
 const sessionLabel = computed(() => active.value ? '本页持权' : phase.value === 'acquiring' ? '正在申请' : occupied.value ? '控制权已占用' : '未申请')
-const robotMotion = computed(() => props.telemetryAvailable && props.robot?.motion ? motionLabels[props.robot.motion] ?? '未收到反馈' : '未收到反馈')
-const moving = computed(() => props.telemetryAvailable && !!props.robot?.motion && props.robot.motion !== 'stop')
-const pose = computed(() => props.telemetryAvailable ? props.robot?.pose ?? props.robot?.position : undefined)
-const note = computed(() => feedback.value || props.disabledReason || (active.value ? '按住方向按钮，或聚焦此区域后使用方向键。松开即停步。' : '申请控制权后，按住方向按钮控制模拟机器人。'))
+const robotMotion = computed(() => {
+  const motion = robotState.value?.motion
+  if (!motion || (props.hardware && motion === 'stop')) return '未收到反馈'
+  return motionLabels[motion] ?? '未收到反馈'
+})
+const moving = computed(() => !props.hardware && directionButtons.some(item => item.action === robotState.value?.motion))
+const pose = computed(() => robotState.value?.pose ?? robotState.value?.position)
+const note = computed(() => feedback.value || props.disabledReason || (active.value
+  ? (props.hardware ? '按住方向按钮发送运动指令，松开发送停步请求。' : '按住方向按钮，或聚焦此区域后使用方向键。松开即停步。')
+  : (props.hardware ? '机器人进入可遥控状态后，申请控制权并按住方向按钮。' : '申请控制权后，按住方向按钮控制模拟机器人。')))
 
 // Keep only one ordinary command awaiting an acknowledgement; stop and release
 // bypass that slot so a slow response cannot delay the operator's stop request.
@@ -130,8 +141,9 @@ function tick() {
     return
   }
   if (pending || socket.bufferedAmount > 0) return
-  const interval = direction.value ? MOVEMENT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS
-  if (now - lastSentAt >= interval) send(direction.value ?? 'heartbeat')
+  const movement = canMove.value ? direction.value : null
+  const interval = movement ? MOVEMENT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS
+  if (now - lastSentAt >= interval) send(movement ?? 'heartbeat')
 }
 
 function parseReply(raw: unknown): Reply | undefined {
@@ -147,7 +159,9 @@ function parseReply(raw: unknown): Reply | undefined {
 
 function rejected(reply: Reply): string {
   const code = reply.code.toLowerCase()
-  if (code.includes('busy') || code.includes('occupied') || code.includes('conflict')) return '机器人正在执行巡检，或控制权已被占用。请稍后重新申请。'
+  if (code.includes('busy') || code.includes('occupied') || code.includes('conflict')) return props.hardware
+    ? '当前无法获得真机控制权，请稍后重新申请。'
+    : '机器人正在执行巡检，或控制权已被占用。请稍后重新申请。'
   if (code.includes('stale') || code.includes('future')) return '指令时间超出有效范围，遥控会话已结束。'
   if (code.includes('lease') || code.includes('expired')) return '遥控控制权已失效，请重新申请。'
   return `${reply.type === 'lease' ? '未取得控制权' : '遥控指令未被接受'}${reply.message ? `：${reply.message}` : '。'}`
@@ -197,7 +211,7 @@ function acquire() {
 }
 
 function beginHold(value: Direction, source: Hold) {
-  if (!active.value || held) return
+  if (!canMove.value || held) return
   feedback.value = ''
   warning.value = false
   held = source
@@ -207,7 +221,7 @@ function beginHold(value: Direction, source: Hold) {
 }
 
 function pressPointer(event: PointerEvent, value: Direction) {
-  if (!active.value || held || !event.isPrimary || event.button !== 0 || !(event.currentTarget instanceof HTMLButtonElement)) return
+  if (!canMove.value || held || !event.isPrimary || event.button !== 0 || !(event.currentTarget instanceof HTMLButtonElement)) return
   event.preventDefault()
   const target = event.currentTarget
   target.focus({ preventScroll: true })
@@ -245,8 +259,22 @@ function blurPage() {
 function hidePage() { if (document.hidden) blurPage() }
 
 watch(phase, value => emit('sessionActive', value !== 'idle'), { flush: 'sync' })
-watch(() => props.disabledReason, value => {
-  if (value && phase.value !== 'idle') endSession(`${value}，遥控会话已结束。`, true)
+watch(() => props.disabledReason, (value, previous) => {
+  if (!value && feedback.value === previous) {
+    feedback.value = ''
+    warning.value = false
+  }
+  if (!value || phase.value === 'idle') return
+  if (props.hardware && active.value) {
+    stopMotion(true)
+    feedback.value = value
+    warning.value = true
+    return
+  }
+  endSession(`${value}，遥控会话已结束。`, true)
+})
+watch(() => props.hardware, () => {
+  if (phase.value !== 'idle') endSession('连接模式已变化，请重新申请控制权。', true)
 })
 
 onMounted(() => {
@@ -276,8 +304,8 @@ function number(value: number | undefined, digits = 2) {
   <section ref="panel" class="panel teleop-panel" data-testid="teleop-panel" aria-labelledby="teleop-heading" @keydown="pressKey" @focusout="leavePanel">
     <header class="panel-heading">
       <div>
-        <h2 id="teleop-heading">手动遥控 <span class="teleop-sim-tag">模拟</span></h2>
-        <p class="panel-caption">申请控制权后，可手动控制模拟机器人</p>
+        <h2 id="teleop-heading">手动遥控 <span class="teleop-mode-tag" :class="{ hardware }">{{ hardware ? '真机' : '模拟' }}</span></h2>
+        <p class="panel-caption">{{ hardware ? '使用高层运动服务控制 H2 真机' : '申请控制权后，可手动控制模拟机器人' }}</p>
       </div>
       <span :class="['teleop-badge', { active }]" data-testid="teleop-session-status" role="status"><i></i>{{ sessionLabel }}</span>
     </header>
@@ -287,13 +315,18 @@ function number(value: number | undefined, digits = 2) {
         <button v-if="phase === 'idle'" class="teleop-session-button primary" type="button" :disabled="!!disabledReason" data-testid="teleop-acquire" @click="acquire">申请控制权</button>
         <button v-else class="teleop-session-button" type="button" data-testid="teleop-release" @click="endSession('本页遥控会话已结束。')">{{ active ? '释放控制权' : '取消申请' }}</button>
       </div>
-      <div ref="pad" class="teleop-pad" tabindex="0" role="group" aria-label="方向控制，按住方向键移动，松开停步" data-testid="teleop-pad">
-        <button v-for="item in directionButtons" :key="item.action" type="button" :class="['teleop-direction', `dir-${item.action}`, { pressed: direction === item.action }]" :aria-label="item.label" :aria-pressed="direction === item.action" :disabled="!active" :data-testid="`teleop-${item.action}`" @pointerdown="pressPointer($event, item.action)" @lostpointercapture="releasePointer" @contextmenu.prevent>
+      <div ref="pad" class="teleop-pad" tabindex="0" role="group" :aria-label="hardware ? '方向控制，按住方向键发送运动指令，松开发送停步请求' : '方向控制，按住方向键移动，松开停步'" data-testid="teleop-pad">
+        <button v-for="item in directionButtons" :key="item.action" type="button" :class="['teleop-direction', `dir-${item.action}`, { pressed: direction === item.action }]" :aria-label="item.label" :aria-pressed="direction === item.action" :disabled="!canMove" :data-testid="`teleop-${item.action}`" @pointerdown="pressPointer($event, item.action)" @lostpointercapture="releasePointer" @contextmenu.prevent>
           <span aria-hidden="true">{{ item.arrow }}</span>{{ item.label }}
         </button>
         <button class="teleop-stop" type="button" :disabled="!active" data-testid="teleop-stop" @click="stopMotion(true)"><span aria-hidden="true">■</span> 停步</button>
       </div>
-      <div class="teleop-telemetry">
+      <div v-if="hardware" class="teleop-telemetry">
+        <div><small>最近指令应答</small><strong data-testid="teleop-motion">{{ robotMotion }}</strong></div>
+        <div><small>状态机 ID</small><strong>{{ robotState?.fsm_id ?? '—' }}</strong></div>
+        <div><small>运动模式</small><strong>{{ robotState?.fsm_mode ?? '—' }}</strong></div>
+      </div>
+      <div v-else class="teleop-telemetry">
         <div><small>运动反馈</small><strong :class="{moving}" data-testid="teleop-motion">{{ robotMotion }}</strong></div>
         <div data-testid="teleop-position"><small>模拟位置 (m)</small><strong>{{ number(pose?.x) }}, {{ number(pose?.y) }}</strong></div>
         <div><small>朝向</small><strong>{{ number(pose?.yaw === undefined ? undefined : pose.yaw * 180 / Math.PI, 0) }}°</strong></div>
@@ -307,7 +340,8 @@ function number(value: number | undefined, digits = 2) {
 .teleop-panel { border-top: 3px solid #69b4b0; }
 .teleop-panel .panel-heading h2 { display: flex; align-items: center; gap: 8px; }
 .teleop-panel .panel-caption { margin-bottom: 0; }
-.teleop-sim-tag { padding: 2px 5px; border-radius: 3px; background: #fcf6e8; color: #896e3f; font-size: 9px; font-weight: 500; }
+.teleop-mode-tag { padding: 2px 5px; border-radius: 3px; background: #fcf6e8; color: #896e3f; font-size: 9px; font-weight: 500; }
+.teleop-mode-tag.hardware { background: #fae7d9; color: #8a4730; }
 .teleop-badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 7px; color: #718795; border: 1px solid #e7edf1; border-radius: 5px; background: #f6f8fa; white-space: nowrap; font-size: 10px; }
 .teleop-badge i { width: 6px; height: 6px; border-radius: 50%; background: #9aabb6; }
 .teleop-badge.active { color: #267e74; border-color: #d2e7e1; background: #eef8f4; }

@@ -9,6 +9,7 @@ class Settings:
     gateway_address: str
     data_dir: Path
     command_ttl_ms: int = 30_000
+    hardware_teleop: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -20,4 +21,5 @@ class Settings:
             gateway_address=os.getenv("H2_GATEWAY_ADDRESS", "127.0.0.1:50051"),
             data_dir=Path(os.getenv("H2_DATA_DIR", ".local/backend-data")).resolve(),
             command_ttl_ms=int(os.getenv("H2_COMMAND_TTL_MS", "30000")),
+            hardware_teleop=os.getenv("H2_HARDWARE_TELEOP") == "1",
         )

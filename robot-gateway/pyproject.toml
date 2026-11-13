@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "h2-robot-gateway"
 version = "0.1.0"
-description = "Simulated gRPC robot gateway for H2 platform technical validation"
+description = "gRPC gateway for simulated inspection and Unitree H2 high-level teleoperation"
 requires-python = ">=3.12"
 dependencies = ["grpcio>=1.85,<2", "protobuf>=7.35.1,<8"]
 

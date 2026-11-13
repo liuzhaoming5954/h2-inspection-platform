@@ -50,24 +50,32 @@ class InspectionService:
             self.gateway.close()
 
     def health(self) -> dict[str, Any]:
+        hardware_teleop = self.settings.hardware_teleop
+        simulated = not hardware_teleop
         with self.engine.connect() as connection:
             from sqlalchemy import text
             connection.execute(text("SELECT 1"))
         try:
-            self.gateway.get_state()
-            gateway_status = "connected"
+            state = self.gateway.get_state()
+            gateway_status = "connected" if state.get("simulated") is simulated else "unavailable"
+            if hardware_teleop and state.get("status") not in {"ready", "not_ready", "teleop"}:
+                gateway_status = "unavailable"
         except Exception:
             gateway_status = "unavailable"
         return {"status": "ok" if gateway_status == "connected" else "degraded", "database": self.engine.dialect.name,
-                "gateway": gateway_status, "simulated": True, "mode": "local-technical-validation"}
+                "gateway": gateway_status, "simulated": simulated, "hardware_teleop": hardware_teleop,
+                "mode": "h2-hardware-teleop" if hardware_teleop else "local-technical-validation"}
 
     def robot(self) -> dict[str, Any]:
         try:
             state = self.gateway.get_state()
-            return {**state, "simulated": state.get("simulated") is True,
-                    "connection_status": "connected", "received_at": utcnow().isoformat()}
         except Exception as error:
-            raise ServiceError(503, "Robot simulator gateway is unavailable") from error
+            raise ServiceError(503, "Robot gateway is unavailable") from error
+        if self.settings.hardware_teleop and state.get("simulated") is not False:
+            raise ServiceError(503, "Hardware teleoperation requires an H2 hardware gateway")
+        return {**state, "simulated": state.get("simulated") is True,
+                "connection_status": "offline" if state.get("status") == "offline" else "connected",
+                "received_at": utcnow().isoformat()}
 
     def _task(self, session: Any, task_id: str, lock: bool = False) -> Task:
         query = select(Task).where(Task.id == task_id)
@@ -79,6 +87,8 @@ class InspectionService:
         return task
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.settings.hardware_teleop:
+            raise ServiceError(409, "Inspection commands are disabled in H2 hardware teleoperation mode")
         request_id = payload["request_id"]
         digest = hashlib.sha256(json.dumps({k: v for k, v in payload.items() if k != "request_id"}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         try:
@@ -112,12 +122,16 @@ class InspectionService:
         return self.get_task(task_id)
 
     def recover_outbox(self) -> None:
+        if self.settings.hardware_teleop:
+            return
         with self.sessions() as session:
             ids = list(session.scalars(select(Outbox.task_id).where(Outbox.status == "pending")))
         for task_id in ids:
             self.dispatch(task_id)
 
     def dispatch(self, task_id: str) -> None:
+        if self.settings.hardware_teleop:
+            return
         # The row lock serializes API/recovery retries. The gateway supplies the
         # second idempotency boundary and persists command_id across restarts.
         with self.sessions.begin() as session:
@@ -152,6 +166,8 @@ class InspectionService:
                 task.updated_at = utcnow()
 
     def synchronize(self, task_id: str) -> None:
+        if self.settings.hardware_teleop:
+            return
         try:
             snapshot = self.gateway.get_task(task_id)
         except Exception:
@@ -219,6 +235,8 @@ class InspectionService:
     def list_tasks(self) -> list[dict[str, Any]]:
         with self.sessions() as session:
             rows = list(session.scalars(select(Task).order_by(Task.created_at.desc()).limit(100)))
+            if self.settings.hardware_teleop:
+                return [self.task_dict(session, task) for task in rows]
             active_ids = [task.id for task in rows if task.status in ("pending_dispatch", "running")]
         if active_ids:
             try:
@@ -232,6 +250,8 @@ class InspectionService:
             return [self.task_dict(session, task) for task in rows]
 
     def stop_task(self, task_id: str) -> dict[str, Any]:
+        if self.settings.hardware_teleop:
+            raise ServiceError(409, "Inspection commands are disabled in H2 hardware teleoperation mode")
         # Send the control request before consulting the business database.
         # A database failure must not prevent an already-running simulated
         # robot from receiving a stop request.

@@ -46,7 +46,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('command', nargs='?', default='start', choices=['start', 'stop', 'status'])
     parser.add_argument('--skip-db', action='store_true', help='Use an already running/external database')
+    parser.add_argument('--h2-interface', help='Use SDK2 on the named H2 network interface for manual teleoperation')
     args = parser.parse_args()
+    if args.h2_interface and args.command != 'start':
+        parser.error('--h2-interface is only used with start')
     RUNTIME.mkdir(exist_ok=True)
     pid = int(PID_FILE.read_text()) if PID_FILE.exists() else None
     if args.command in {'stop', 'status'}:
@@ -64,13 +67,21 @@ def main() -> None:
         raise SystemExit(f'Validation supervisor already running (PID {pid})')
     if not PYTHON.exists():
         raise SystemExit('Install project dependencies first; see README.md')
-    if not args.skip_db:
+    if not args.skip_db and not args.h2_interface:
         subprocess.run([sys.executable, str(ROOT / 'scripts/manage_postgres.py'), 'start'], check=True)
     environment = os.environ.copy()
-    environment['PATH'] = f'{PYTHON.parent}:{environment.get("PATH", os.defpath)}'
-    environment.setdefault('H2_DATABASE_URL', 'postgresql+psycopg://h2@127.0.0.1:55432/h2_validation')
-    environment.setdefault('H2_GATEWAY_ADDRESS', '127.0.0.1:50051')
-    environment.setdefault('H2_DATA_DIR', str(RUNTIME / 'data'))
+    environment['PATH'] = os.pathsep.join((str(PYTHON.parent), environment.get('PATH', os.defpath)))
+    environment['H2_HARDWARE_TELEOP'] = '1' if args.h2_interface else '0'
+    gateway_args = ['--db', str(RUNTIME / 'gateway.sqlite')]
+    if args.h2_interface:
+        environment['H2_DATABASE_URL'] = f'sqlite:///{RUNTIME / "hardware.sqlite"}'
+        environment['H2_GATEWAY_ADDRESS'] = '127.0.0.1:50051'
+        environment['H2_DATA_DIR'] = str(RUNTIME / 'hardware-data')
+        gateway_args = ['--h2-interface', args.h2_interface]
+    else:
+        environment.setdefault('H2_DATABASE_URL', 'postgresql+psycopg://h2@127.0.0.1:55432/h2_validation')
+        environment.setdefault('H2_GATEWAY_ADDRESS', '127.0.0.1:50051')
+        environment.setdefault('H2_DATA_DIR', str(RUNTIME / 'data'))
     node = shutil.which('node', path=environment['PATH'])
     if not node:
         raise SystemExit('Node.js not found; install/use Node.js 24')
@@ -78,9 +89,9 @@ def main() -> None:
     log_dir.mkdir(exist_ok=True)
     commands = [
         ('gateway', [str(PYTHON), '-m', 'h2_gateway.server', '--host', '127.0.0.1',
-                     '--port', '50051', '--db', str(RUNTIME / 'gateway.sqlite')], ROOT),
+                     '--port', '50051', *gateway_args], ROOT),
         ('api', [str(PYTHON), '-m', 'uvicorn', 'h2_backend.app:create_app', '--factory',
-                 '--host', '127.0.0.1', '--port', '8000'], ROOT),
+                 '--host', '127.0.0.1', '--port', '8000', '--no-proxy-headers'], ROOT),
         ('frontend', [node, str(ROOT / 'frontend/node_modules/vite/bin/vite.js'),
                       '--host', '127.0.0.1', '--port', '5173', '--strictPort'], ROOT / 'frontend'),
     ]
@@ -107,7 +118,8 @@ def main() -> None:
         wait_url('http://127.0.0.1:5173', processes[2])
         print(json.dumps({'page': 'http://127.0.0.1:5173',
                           'api': 'http://127.0.0.1:8000/docs',
-                          'mode': 'SIMULATION ONLY'}, ensure_ascii=False), flush=True)
+                          'mode': 'H2 HARDWARE TELEOP' if args.h2_interface else 'SIMULATION ONLY'},
+                         ensure_ascii=False), flush=True)
         while not stopping:
             for process in processes:
                 if process.poll() is not None:

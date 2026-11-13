@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import suppress
+from ipaddress import ip_address
 import time
 from typing import Any, Literal
 
@@ -45,6 +46,11 @@ MESSAGES = {
     "future_command": "指令时间晚于服务器时间，未发送给网关。",
     "invalid_message": "遥控消息格式不正确。",
     "simulation_required": "当前入口仅支持模拟机器人遥控。",
+    "hardware_required": "真机遥控需要连接 H2 真机网关。",
+    "robot_not_ready": "H2 高层运控尚未就绪。",
+    "hardware_unavailable": "H2 高层运控不可用，遥控会话已结束。",
+    "sdk_rejected": "H2 未确认运动指令，遥控会话已结束。",
+    "stop_unconfirmed": "H2 未确认停步请求，请在现场确认机器人状态。",
     "gateway_timeout": "网关响应超时，遥控会话已结束。",
     "gateway_unavailable": "无法连接模拟机器人网关。",
     "gateway_protocol_error": "网关未返回有效的模拟遥控控制权。",
@@ -52,10 +58,22 @@ MESSAGES = {
     "idle_timeout": "遥控会话长时间未收到指令，请重新获取控制权。",
     "ok": "网关已确认遥控请求。",
 }
+HARDWARE_MESSAGES = {
+    "acquired": "已获得 H2 真机遥控控制权。",
+    "applied": "H2 已接收运动指令。",
+    "stopped": "H2 已接收停步请求。",
+    "renewed": "已续期 H2 真机遥控控制权。",
+    "released": "已释放 H2 真机遥控控制权。",
+    "gateway_unavailable": "无法连接 H2 真机网关，遥控会话已结束。",
+    "gateway_protocol_error": "H2 真机网关返回的遥控响应无效，遥控会话已结束。",
+}
+HARDWARE_FAILURES = frozenset({"robot_not_ready", "hardware_unavailable", "sdk_rejected", "stop_unconfirmed"})
+HARDWARE_ACKS = {"heartbeat": "renewed", "release": "released", "stop": "stopped"}
+VALIDATION_ERRORS = frozenset({"stale_sequence", "expired", "invalid_expiry", "invalid_action"})
 GATEWAY_CODES = frozenset({
     "acquired", "applied", "stopped", "renewed", "released", "teleop_busy", "robot_busy",
     "invalid_token", "stale_sequence", "expired", "invalid_expiry", "invalid_action",
-})
+}) | HARDWARE_FAILURES
 
 
 def trusted_ui(websocket: WebSocket) -> bool:
@@ -66,11 +84,13 @@ def trusted_ui(websocket: WebSocket) -> bool:
             and all(host.lower() in LOCAL_HOSTS for host in hosts + forwarded))
 
 
-async def reply(websocket: WebSocket, kind: str, accepted: bool, code: str, sequence: int | None = None) -> None:
-    body: dict[str, Any] = {"type": kind, "accepted": accepted, "code": code, "message": MESSAGES[code]}
-    if sequence is not None:
-        body["sequence"] = sequence
-    await websocket.send_json(body)
+def loopback_peer(websocket: WebSocket) -> bool:
+    if websocket.client is None:
+        return False
+    try:
+        return ip_address(websocket.client.host).is_loopback
+    except ValueError:
+        return False
 
 
 def gateway_outcome(result: dict[str, Any]) -> tuple[bool, str]:
@@ -88,18 +108,34 @@ def transport_code(error: Exception) -> str:
     return "gateway_unavailable"
 
 
-async def teleop_socket(websocket: WebSocket, gateway: Any) -> None:
-    if not trusted_ui(websocket):
+async def teleop_socket(websocket: WebSocket, gateway: Any, *, hardware_teleop: bool = False) -> None:
+    if not trusted_ui(websocket) or (hardware_teleop and not loopback_peer(websocket)):
         await websocket.close(code=1008)
         return
+
+    async def send(kind: str, accepted: bool, code: str, sequence: int | None = None) -> None:
+        message = HARDWARE_MESSAGES.get(code, MESSAGES[code]) if hardware_teleop else MESSAGES[code]
+        body: dict[str, Any] = {"type": kind, "accepted": accepted, "code": code, "message": message}
+        if sequence is not None:
+            body["sequence"] = sequence
+        await websocket.send_json(body)
 
     await websocket.accept()
     token = None
     try:
         try:
             state = await asyncio.to_thread(gateway.get_state)
-            if state.get("simulated") is not True:
-                await reply(websocket, "lease", False, "simulation_required")
+            denied = None
+            expected_simulated = not hardware_teleop
+            if state.get("simulated") is not expected_simulated:
+                denied = "hardware_required" if hardware_teleop else "simulation_required"
+            elif hardware_teleop:
+                if state.get("status") in {"offline", "fault"}:
+                    denied = "hardware_unavailable"
+                elif state.get("teleop_ready") is not True or state.get("status") not in {"ready", "teleop"}:
+                    denied = "robot_not_ready"
+            if denied:
+                await send("lease", False, denied)
                 await websocket.close(code=1008)
                 return
             result = await asyncio.to_thread(gateway.teleop_acquire)
@@ -107,27 +143,31 @@ async def teleop_socket(websocket: WebSocket, gateway: Any) -> None:
         except WebSocketDisconnect:
             raise
         except Exception as error:
-            await reply(websocket, "lease", False, transport_code(error))
+            await send("lease", False, transport_code(error))
             await websocket.close(code=1011)
             return
 
         if not accepted:
-            await reply(websocket, "lease", False, code)
+            await send("lease", False, code)
             await websocket.close(code=1008)
             return
         candidate = result.get("token")
         if not isinstance(candidate, str) or not candidate:
-            await reply(websocket, "lease", False, "gateway_protocol_error")
+            await send("lease", False, "gateway_protocol_error")
             await websocket.close(code=1011)
             return
         token = candidate
-        await reply(websocket, "lease", True, code)
+        if hardware_teleop and code != "acquired":
+            await send("lease", False, "gateway_protocol_error")
+            await websocket.close(code=1011)
+            return
+        await send("lease", True, code)
 
         while True:
             try:
                 frame = await asyncio.wait_for(websocket.receive(), timeout=IDLE_TIMEOUT_SECONDS)
             except TimeoutError:
-                await reply(websocket, "error", False, "idle_timeout")
+                await send("error", False, "idle_timeout")
                 await websocket.close(code=1008)
                 return
             if frame["type"] == "websocket.disconnect":
@@ -138,7 +178,7 @@ async def teleop_socket(websocket: WebSocket, gateway: Any) -> None:
                     raise ValueError("Invalid text frame")
                 command = TeleopInput.model_validate_json(raw)
             except (ValidationError, ValueError):
-                await reply(websocket, "error", False, "invalid_message")
+                await send("error", False, "invalid_message")
                 continue
 
             now_ms = time.time_ns() // 1_000_000
@@ -146,11 +186,11 @@ async def teleop_socket(websocket: WebSocket, gateway: Any) -> None:
                 expires_at_ms = now_ms + COMMAND_TTL_MS
             else:
                 if command.sent_at_ms > now_ms:
-                    await reply(websocket, "ack", False, "future_command", command.sequence)
+                    await send("ack", False, "future_command", command.sequence)
                     continue
                 expires_at_ms = command.sent_at_ms + COMMAND_TTL_MS
                 if expires_at_ms <= now_ms:
-                    await reply(websocket, "ack", False, "stale_command", command.sequence)
+                    await send("ack", False, "stale_command", command.sequence)
                     continue
 
             try:
@@ -162,23 +202,27 @@ async def teleop_socket(websocket: WebSocket, gateway: Any) -> None:
                     )
                 accepted, code = gateway_outcome(result)
             except Exception as error:
-                await reply(websocket, "error", False, transport_code(error), command.sequence)
+                await send("error", False, transport_code(error), command.sequence)
                 await websocket.close(code=1011)
                 return
 
-            # A lost or expired lease is terminal for this socket. Never
-            # silently reacquire or replay a movement command after it is lost.
+            if hardware_teleop and accepted:
+                expected = HARDWARE_ACKS.get(command.action, "applied")
+                if code != expected:
+                    await send("error", False, "gateway_protocol_error", command.sequence)
+                    await websocket.close(code=1011)
+                    return
             if code == "invalid_token" or (command.action == "release" and accepted):
                 token = None
-            await reply(websocket, "ack", accepted, code, command.sequence)
-            if code == "invalid_token" or command.action == "release":
+            await send("ack", accepted, code, command.sequence)
+            if code == "invalid_token" or command.action == "release" or (
+                hardware_teleop and not accepted and (code not in VALIDATION_ERRORS or command.action == "stop")
+            ):
                 await websocket.close(code=1000 if accepted else 1008)
                 return
     except WebSocketDisconnect:
         pass
     finally:
         if token is not None:
-            # The simulator watchdog remains authoritative if the link is down
-            # or the browser vanishes before an explicit release reaches us.
             with suppress(Exception):
                 await asyncio.to_thread(gateway.teleop_release, token)

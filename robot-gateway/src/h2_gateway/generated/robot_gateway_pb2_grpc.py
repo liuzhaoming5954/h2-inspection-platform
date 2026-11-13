@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class RobotGatewayStub:
-    """Local validation simulator. This contract does not claim hardware support.
+    """Local simulator or H2 high-level hardware teleoperation gateway.
     """
 
     def __init__(self, channel):
@@ -73,7 +73,7 @@ class RobotGatewayStub:
 
 
 class RobotGatewayServicer:
-    """Local validation simulator. This contract does not claim hardware support.
+    """Local simulator or H2 high-level hardware teleoperation gateway.
     """
 
     def GetState(self, request, context):
@@ -165,7 +165,7 @@ def add_RobotGatewayServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class RobotGateway:
-    """Local validation simulator. This contract does not claim hardware support.
+    """Local simulator or H2 high-level hardware teleoperation gateway.
     """
 
     @staticmethod

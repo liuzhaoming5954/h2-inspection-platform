@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package h2.gateway.v1;
 
-// Local validation simulator. This contract does not claim hardware support.
+// Local simulator or H2 high-level hardware teleoperation gateway.
 service RobotGateway {
   rpc GetState(Empty) returns (RobotState);
   rpc StartTask(StartTaskRequest) returns (CommandReply);
@@ -67,6 +67,9 @@ message RobotState {
   string updated_at = 11;
   bool teleop_active = 12;
   string motion = 13;
+  bool teleop_ready = 14;
+  optional int32 fsm_id = 15;
+  optional int32 fsm_mode = 16;
 }
 
 message TeleopCommandRequest {
