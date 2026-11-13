@@ -59,7 +59,8 @@ message RobotState {
   string task_id = 3;
   double progress = 4;
   int64 sequence = 5;
-  double battery_percent = 6;
+  // Present when the engine has a live battery reading (hardware bmsstate).
+  optional double battery_percent = 6;
   Pose pose = 7;
   bool simulated = 8;
   int64 start_count = 9;
@@ -70,6 +71,9 @@ message RobotState {
   bool teleop_ready = 14;
   optional int32 fsm_id = 15;
   optional int32 fsm_mode = 16;
+  // Ambient environment from the PC2 RS-485 sensor agent; absent when stale.
+  optional double temperature_c = 17;
+  optional double humidity_percent = 18;
 }
 
 message TeleopCommandRequest {

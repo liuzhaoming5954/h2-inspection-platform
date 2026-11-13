@@ -23,6 +23,7 @@ MOVING = 1
 SDK_TIMEOUT = 0.10
 STATE_POLL_INTERVAL = 0.35
 STATE_MAX_AGE = 0.8
+DEFAULT_SENSOR_AGENT_URL = "http://192.168.124.162:8090/environment"
 MAX_VELOCITY_DURATION = 0.25
 MIN_VELOCITY_DURATION = 0.04
 
@@ -89,11 +90,106 @@ class UnitreeLoco:
             raise RuntimeError(f"H2 SetVelocity failed (SDK code {code})")
 
 
+class EnvironmentSource(Protocol):
+    def sample(self) -> dict | None: ...
+
+
+class BatterySource(Protocol):
+    def battery(self) -> float | None: ...
+
+
+class BmsWatcher:
+    """Subscribe the robot's low-frequency BMS topic on the live channel factory.
+
+    Must be constructed after ChannelFactoryInitialize (UnitreeLoco does it).
+    Stale or missing readings degrade to None; the field stays absent.
+    """
+
+    def __init__(self, topic: str = "rt/lf/bmsstate", *, fresh_seconds: float = 5.0):
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_
+
+        self._lock = threading.Lock()
+        self._fresh_seconds = fresh_seconds
+        self._reading: tuple[float, float] | None = None  # (monotonic, soc percent)
+        self._subscriber = ChannelSubscriber(topic, BmsState_)
+        self._subscriber.Init(self._on_message, 1)
+
+    def _on_message(self, message) -> None:
+        with self._lock:
+            self._reading = (time.monotonic(), float(message.soc))
+
+    def battery(self) -> float | None:
+        with self._lock:
+            reading = self._reading
+        if reading is None or time.monotonic() - reading[0] > self._fresh_seconds:
+            return None
+        return reading[1]
+
+
+class AgentEnvironment:
+    """Poll the PC2 RS-485 sensor agent; serve the last fresh reading.
+
+    Read failures and staleness degrade to None (fields simply absent from
+    state); telemetry never blocks or affects the motion paths.
+    """
+
+    def __init__(self, url: str, *, interval: float = 2.0, fresh_seconds: float = 8.0,
+                 fetch=None):
+        self._url = url
+        self._interval = max(0.5, interval)
+        self._fresh_seconds = fresh_seconds
+        self._fetch = fetch or self._http_fetch
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._reading: tuple[float, dict] | None = None  # (monotonic, values)
+
+    def _http_fetch(self) -> dict | None:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(self._url, timeout=1.5) as response:
+                payload = json.loads(response.read().decode())
+        except Exception:
+            return None
+        sample = payload.get("sample") if isinstance(payload, dict) else None
+        if not isinstance(sample, dict) or payload.get("available") is not True:
+            return None
+        temperature = sample.get("temperature_c")
+        humidity = sample.get("humidity_percent")
+        if not isinstance(temperature, (int, float)) or not isinstance(humidity, (int, float)):
+            return None
+        return {"temperature_c": float(temperature), "humidity_percent": float(humidity)}
+
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(self._interval):
+            reading = self._fetch()
+            if reading is not None:
+                with self._lock:
+                    self._reading = (time.monotonic(), reading)
+
+    def start(self) -> "AgentEnvironment":
+        threading.Thread(target=self._poll_loop, name="h2-environment-poll", daemon=True).start()
+        return self
+
+    def sample(self) -> dict | None:
+        with self._lock:
+            reading = self._reading
+        if reading is None or time.monotonic() - reading[0] > self._fresh_seconds:
+            return None
+        return reading[1]
+
+    def close(self) -> None:
+        self._stop.set()
+
+
 class H2HardwareGateway:
     """One serialized SDK writer and one non-persistent control lease."""
 
-    def __init__(self, loco: Loco):
+    def __init__(self, loco: Loco, environment: EnvironmentSource | None = None,
+                 battery: BatterySource | None = None):
         self._loco = loco
+        self._environment = environment
+        self._battery = battery
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
         self._fsm: tuple[int, int | None] | None = None
@@ -189,6 +285,15 @@ class H2HardwareGateway:
                 state["fsm_id"] = fsm_id
                 if fsm_mode is not None:
                     state["fsm_mode"] = fsm_mode
+            if self._environment is not None:
+                reading = self._environment.sample()
+                if reading is not None:
+                    state["temperature_c"] = reading["temperature_c"]
+                    state["humidity_percent"] = reading["humidity_percent"]
+            if self._battery is not None:
+                percent = self._battery.battery()
+                if percent is not None:
+                    state["battery_percent"] = percent
             return state
 
     def teleop_acquire(self) -> dict:
@@ -272,6 +377,8 @@ class H2HardwareGateway:
         with self._lock:
             self._revoke()
         self._worker.join()
+        if self._environment is not None:
+            self._environment.close()
 
 
 def probe() -> None:

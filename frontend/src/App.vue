@@ -70,6 +70,14 @@ const hardwareStateNames: Record<string, string> = { ready: '可遥控', not_rea
 const hardwareState = computed(() => robotAvailable.value && robot.value?.simulated === false && robot.value.status
   ? hardwareStateNames[robot.value.status] ?? '状态未知'
   : '未连接')
+// Hardware mode reads ambient values from the live robot state (PC2 RS-485
+// sensor via the gateway); simulation keeps using task samples.
+const hardwareEnvironment = computed(() => hardwareMode.value && robot.value?.simulated === false)
+const environmentTemperature = computed(() => hardwareEnvironment.value ? robot.value?.temperature_c ?? null : latestSample.value?.temperature_c ?? null)
+const environmentHumidity = computed(() => hardwareEnvironment.value ? robot.value?.humidity_percent ?? null : latestSample.value?.humidity_percent ?? null)
+const environmentNote = computed(() => hardwareEnvironment.value
+  ? environmentTemperature.value != null ? '机身温湿度传感器 · 实测' : '等待传感器数据'
+  : latestSample.value ? `${latestSample.value.label ?? latestSample.value.point_id} · 合成采样` : '任务执行后显示采集结果')
 const taskState = computed(() => selectedTask.value ? stateNames[selectedTask.value.status] ?? selectedTask.value.status : '等待下发')
 const stateTone = computed(() => selectedTask.value?.status === 'completed' ? 'success' : active.value ? 'primary' : selectedTask.value ? 'warning' : 'info')
 
@@ -261,10 +269,20 @@ onBeforeUnmount(() => {
             <div class="metric-value">{{ hardwareState }}</div>
             <div class="metric-foot">最近查询 {{ lastSync || '—' }}</div>
           </div>
+          <div v-if="hardwareMode" class="metric-card">
+            <div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div>
+            <div class="metric-value">{{ battery == null ? '—' : battery.toFixed(0) }}<span v-if="battery != null" class="metric-unit">%</span></div>
+            <div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div>
+          </div>
+          <div v-if="hardwareMode" class="metric-card">
+            <div class="metric-top"><span>环境温湿度</span><span class="metric-icon">♧</span></div>
+            <div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div>
+            <div class="metric-foot">{{ environmentTemperature != null ? '机身传感器 · 实测' : '等待传感器数据' }}</div>
+          </div>
           <template v-else>
             <div class="metric-card"><div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div><div class="metric-value">{{ battery === undefined ? '—' : battery.toFixed(0) }}<span class="metric-unit">%</span><span class="small-status">{{ robot?.status ? stateNames[robot.status] ?? robot.status : '状态未知' }}</span></div><div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div></div>
             <div class="metric-card"><div class="metric-top"><span>任务完成进度</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ progress.toFixed(0) }}<span class="metric-unit">%</span><el-tag size="small" :type="stateTone" effect="light">{{ taskState }}</el-tag></div><div class="metric-foot">已采集 {{ samples.length }} / {{ points.length }} 个巡检点</div></div>
-            <div class="metric-card"><div class="metric-top"><span>最近环境采样</span><span class="metric-icon">♧</span></div><div class="sample-values"><strong>{{ latestSample?.temperature_c?.toFixed(1) ?? '—' }}<span>℃</span></strong><i></i><strong>{{ latestSample?.humidity_percent?.toFixed(1) ?? '—' }}<span>%RH</span></strong></div><div class="metric-foot">{{ latestSample ? `${latestSample.label ?? latestSample.point_id} · 合成采样` : '任务执行后显示采集结果' }}</div></div>
+            <div class="metric-card"><div class="metric-top"><span>最近环境采样</span><span class="metric-icon">♧</span></div><div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div><div class="metric-foot">{{ environmentNote }}</div></div>
           </template>
         </section>
 

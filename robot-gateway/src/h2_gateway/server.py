@@ -15,7 +15,13 @@ import grpc
 from h2_gateway.engine import SimulatorEngine
 from h2_gateway.generated import robot_gateway_pb2 as pb
 from h2_gateway.generated import robot_gateway_pb2_grpc as rpc
-from h2_gateway.hardware import H2HardwareGateway, UnitreeLoco
+from h2_gateway.hardware import (
+    DEFAULT_SENSOR_AGENT_URL,
+    AgentEnvironment,
+    BmsWatcher,
+    H2HardwareGateway,
+    UnitreeLoco,
+)
 
 
 class GatewayService(rpc.RobotGatewayServicer):
@@ -104,7 +110,19 @@ def main() -> None:
         try:
             if not ip_address(args.host).is_loopback:
                 parser.error("H2 hardware gateway requires a loopback IP address")
-            engine = H2HardwareGateway(UnitreeLoco(args.h2_interface))
+            loco = UnitreeLoco(args.h2_interface)
+            battery = None
+            try:
+                battery = BmsWatcher()
+            except Exception as error:  # SDK present but BMS unavailable: degrade.
+                print(json.dumps({"warning": f"bms watcher unavailable: {error}"}), flush=True)
+            engine = H2HardwareGateway(
+                loco,
+                AgentEnvironment(
+                    os.environ.get("H2_SENSOR_AGENT_URL", DEFAULT_SENSOR_AGENT_URL)
+                ).start(),
+                battery,
+            )
         except (RuntimeError, ValueError) as error:
             parser.error(str(error))
     else:
