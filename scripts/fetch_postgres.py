@@ -18,6 +18,13 @@ PREFIX = ROOT / '.runtime' / 'pgsql'
 BASE = 'https://apt.postgresql.org/pub/repos/apt/'
 
 
+def dist_codename() -> str:
+    for line in Path('/etc/os-release').read_text().splitlines():
+        if line.startswith('VERSION_CODENAME='):
+            return line.split('=', 1)[1].strip()
+    raise SystemExit('Could not determine distribution codename from /etc/os-release')
+
+
 def download(url: str, destination: Path) -> None:
     partial = destination.with_suffix(destination.suffix + '.part')
     subprocess.run(
@@ -33,7 +40,7 @@ def main() -> None:
     index = PACKAGES / 'Packages.gz'
     if not index.exists():
         download(
-            BASE + 'dists/noble-pgdg/main/binary-amd64/Packages.gz', index
+            BASE + f'dists/{dist_codename()}-pgdg/main/binary-amd64/Packages.gz', index
         )
     entries: dict[str, dict[str, str]] = {}
     for paragraph in gzip.decompress(index.read_bytes()).decode().split('\n\n'):
