@@ -74,6 +74,8 @@ message RobotState {
   // Ambient environment from the PC2 RS-485 sensor agent; absent when stale.
   optional double temperature_c = 17;
   optional double humidity_percent = 18;
+  // Original PC2 sample time in Unix seconds, for expiry between state polls.
+  optional double environment_captured_at = 19;
 }
 
 message TeleopCommandRequest {

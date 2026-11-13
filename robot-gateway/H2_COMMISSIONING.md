@@ -4,7 +4,31 @@
 
 上位机接 H2 的外部开发网络。PC3 使用运控侧网卡发现 `sport` 服务。现场先确认 PC3 的内外网口、SSH 登录地址和 H2 固件及运控版本。
 
-## 1. 准备 PC3
+## 1. 核对版本和时钟
+
+PC3 网关和上位机的后端与前端使用同一个代码提交。部署时一并更新生成的 gRPC 代码，确保 `/api/robot` 能收到 PC2 的原始采样时间 `environment_captured_at`。PC2 可沿用已部署且能返回 `captured_at` 的传感器代理。记录各端版本，便于复验。
+
+启动前用现场时间源同步 PC2、PC3 和上位机的系统时钟，并确认浏览器所在机器的时钟也已同步。PC3 用系统时间判断遥控指令是否过期，PC3 和浏览器都要用系统时间校验 PC2 的原始采样时间。时钟偏差会使正常读数被判为未来数据或过期数据。
+
+## 2. 在 PC2 启动温湿度代理
+
+在 PC2 确认 RS-485 对应的串口设备和运行用户的访问权限。部署 `scripts/sensor_agent_pc2.py`，按现场配置确认脚本中的 `PORT`、`BIND` 和 `HTTP_PORT`。将 `BIND` 设为 PC3 可达的 PC2 开发网地址，限制代理只在受控开发网内访问。下面从仓库根目录创建环境并启动代理。
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install pyserial
+.venv/bin/python -u scripts/sensor_agent_pc2.py
+```
+
+在 PC3 上验证 `GET /environment`，将下面的 `pc2-host` 和端口替换为实际配置。
+
+```bash
+curl --fail --show-error 'http://pc2-host:8090/environment'
+```
+
+正常响应应包含 `available: true` 和 `sample`，其中 `temperature_c`、`humidity_percent` 是原始读数，`captured_at` 是 PC2 采样时的 Unix 时间戳（秒）。连续读不到有效样本时，可用 `consecutive_failures` 辅助排查串口权限、线路及传感器配置。最后一条有效样本超过 8 秒后，代理返回 `available: false`。
+
+## 3. 准备 PC3
 
 确认 PC3 的系统、架构和 Python 版本。网关要求 Python 3.12 或更高版本。以下示例使用 Python 3.12，PC3 只需网关和 SDK 依赖。准备与 PC3 系统匹配的 C 编译器、CMake、Git 和所用 Python 的开发头文件，然后在 PC3 的仓库根目录执行。
 
@@ -30,7 +54,7 @@ export CYCLONEDDS_HOME="$h2_sdk_root/cyclonedds-install"
 
 `opencv-python-headless` 提供 SDK 所需的 `cv2`。给 SDK 使用 `--no-deps` 可沿用已安装的 NumPy、CycloneDDS 和 `cv2`。
 
-## 2. 在 PC3 只读探测并启动网关
+## 4. 在 PC3 只读探测并启动网关
 
 1. 在 PC3 用 `ip -br link` 和 `ip -br addr` 核对接入运控网络的网卡。下面的 `eth10` 是示例，请替换成现场确认的网卡名。
 2. 清空测试区域，准备防跌倒措施，确认原厂急停和控制权交接。由现场工程师按宇树流程将 H2 置于 **601 主运控站立模式**。
@@ -40,15 +64,18 @@ export CYCLONEDDS_HOME="$h2_sdk_root/cyclonedds-install"
 .venv/bin/python -m h2_gateway.hardware --interface eth10
 ```
 
-4. 只读探测就绪后，在 PC3 启动网关。保留前台终端输出以便回看，gRPC 监听 PC3 的回环地址。
+4. 只读探测就绪后，在 PC3 启动网关。将 `H2_SENSOR_AGENT_URL` 指向第 2 步验证过的 PC2 代理地址。保留前台终端输出以便回看，gRPC 监听 PC3 的回环地址。
 
 ```bash
-.venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051
+H2_SENSOR_AGENT_URL='http://pc2-host:8090/environment' \
+  .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051
 ```
 
-## 3. 在 x86 上位机建立转发并启动应用
+PC3 后台轮询 PC2 代理，并从 DDS 话题 `rt/lf/bmsstate` 订阅 BMS 电量。网关将 BMS 的 `soc` 作为 `battery_percent` 上报。无 BMS 读数或最新读数超过 5 秒时，电量显示 `—`。温湿度和电量可独立降级，排查遥测时可继续查询运控状态。
 
-在上位机按项目 README 安装 Python 和前端依赖。外置网关模式使用独立的本地 SQLite 数据库，可跳过 PostgreSQL 的下载和启动。先确认上位机与 PC3 的系统时钟已同步，网关会用 PC3 的时间判断遥控指令是否过期。[项目 README](../README.md)
+## 5. 在 x86 上位机建立转发并启动应用
+
+在上位机按项目 README 安装 Python 和前端依赖。外置网关模式使用独立的本地 SQLite 数据库，可跳过 PostgreSQL 的下载和启动。[项目 README](../README.md)
 
 1. 用现场分配的 PC3 SSH 账号建立本地转发。把 `pc3-user@pc3-host` 替换为实际账号和开发口地址，并通过可信渠道核对并登记 PC3 主机密钥。以下命令在前台运行，把上位机的 `127.0.0.1:15051` 转发至 PC3 的 `127.0.0.1:50051`。[OpenSSH 本地转发说明](https://man.openbsd.org/ssh.1)
 
@@ -67,7 +94,13 @@ ssh -N -T -S none -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
 
 3. 在同一台上位机打开页面，确认显示「H2 真机遥控」，并检查机器人状态接口返回 `simulated: false` 和 `teleop_ready: true` 后再申请控制权。日志分别来自 PC3 的网关终端、上位机的 SSH 终端和上位机的 `.runtime/logs/api.log`。[上位机页面](http://127.0.0.1:5173) · [机器人状态接口](http://127.0.0.1:8000/api/robot)
 
-## 4. 现场验收
+4. 在机器人状态接口核对 `temperature_c`、`humidity_percent`、`environment_captured_at` 和 `battery_percent`。其中 `environment_captured_at` 应与对应 PC2 样本的 `captured_at` 一致。温湿度从原始采样时刻起最多显示 8 秒，重复轮询不会延长有效期。采样时间缺失、无效、处于未来或遥测断开时，页面隐藏实测温湿度及「实测」标记。
+
+## 6. 现场验收
+
+PC2 温湿度和 PC3 电量已有现场联调记录。本版本的温湿度到期与恢复，以及方向、停步、释放控制权和两段断链，仍需在真机上验收。
+
+在静止状态下核对页面温湿度和电量与原始遥测相符。保持 PC3 网关和上位机运行，停止 PC2 代理，记录最后一条样本的 `captured_at`，确认距该时刻 8 秒后页面清除两项读数及「实测」标记。恢复 PC2 代理，确认新采样到达后页面恢复显示。
 
 每次只按住一个方向，松开并观察实际停稳后再进行下一项。初始请求限幅为前后 0.15 m/s 和左右 0.25 rad/s，非零速度单帧有效期最多 250 ms。停步回执表示 H2 高层运控服务已应答零速度请求，停稳时间和距离由现场实测。若显示「停步未确认」，先用原厂控制手段处置，确认已停稳后检查链路和 PC3 网关日志。若网关保持故障状态，排除原因后在 PC3 重新做只读探测，再重启网关。
 
@@ -82,7 +115,7 @@ ssh -N -T -S none -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
 1. **上位机到 PC3。** 保持 PC3 网关和运控侧通信正常，从上位机结束前台 SSH 转发。记录页面连接状态、PC3 网关日志、实际停稳时间和距离。恢复转发后确认旧会话失效且运动没有自动恢复。再次测试需重新申请控制权。
 2. **PC3 到 H2 运控。** 保持上位机 SSH 转发和 PC3 网关运行，只用宇树批准的方法中断 PC3 SDK 与运控服务之间的 DDS 通信，保持本体安全与急停链路完整。记录运控状态丢失、停步请求或超时日志，以及机器人实际停稳时间和距离。恢复后先核对只读状态并确认旧会话失效，再申请新会话。现场尚无批准方法时，记录这一项待厂商支持。
 
-反馈请附 H2 固件与运控版本、上位机和 PC3 的系统与 Python 版本、两端代码提交、各项实测时间和结果。异常附发生时间与两端日志。若零速度后仍原地踏步，按厂商手册检查是否处于持续踏步模式，并记录现场结果。
+反馈请附 H2 固件与运控版本、PC2、PC3 和上位机的系统与 Python 版本、各端代码提交、各项实测时间和结果。异常附发生时间与相关日志。若零速度后仍原地踏步，按厂商手册检查是否处于持续踏步模式，并记录现场结果。
 
 ## 不接机器人时复现
 

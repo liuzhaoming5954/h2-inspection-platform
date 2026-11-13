@@ -50,7 +50,8 @@ class GatewayClient:
                 "fsm_id": state.fsm_id if state.HasField("fsm_id") else None,
                 "fsm_mode": state.fsm_mode if state.HasField("fsm_mode") else None,
                 "temperature_c": state.temperature_c if state.HasField("temperature_c") else None,
-                "humidity_percent": state.humidity_percent if state.HasField("humidity_percent") else None}
+                "humidity_percent": state.humidity_percent if state.HasField("humidity_percent") else None,
+                "environment_captured_at": state.environment_captured_at if state.HasField("environment_captured_at") else None}
 
     def teleop_acquire(self) -> dict[str, Any]:
         return teleop_dict(self.stub.TeleopAcquire(pb.Empty(), timeout=min(self.timeout, 0.75)))

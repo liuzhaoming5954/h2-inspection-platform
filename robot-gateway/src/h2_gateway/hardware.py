@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import secrets
 import socket
 import threading
@@ -142,7 +143,7 @@ class AgentEnvironment:
         self._fetch = fetch or self._http_fetch
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._reading: tuple[float, dict] | None = None  # (monotonic, values)
+        self._reading: tuple[float, dict] | None = None  # (monotonic expiry, PC2 sample)
 
     def _http_fetch(self) -> dict | None:
         import urllib.request
@@ -154,18 +155,36 @@ class AgentEnvironment:
         sample = payload.get("sample") if isinstance(payload, dict) else None
         if not isinstance(sample, dict) or payload.get("available") is not True:
             return None
-        temperature = sample.get("temperature_c")
-        humidity = sample.get("humidity_percent")
-        if not isinstance(temperature, (int, float)) or not isinstance(humidity, (int, float)):
-            return None
-        return {"temperature_c": float(temperature), "humidity_percent": float(humidity)}
+        reading = {}
+        for field in ("temperature_c", "humidity_percent", "captured_at"):
+            value = sample.get(field)
+            if type(value) not in (int, float):
+                return None
+            try:
+                reading[field] = float(value)
+            except OverflowError:
+                return None
+            if not math.isfinite(reading[field]):
+                return None
+        return reading
+
+    def _poll_once(self) -> None:
+        reading = self._fetch()
+        if reading is None:
+            return
+        captured_at = reading["captured_at"]
+        age = time.time() - captured_at
+        if not 0 <= age <= self._fresh_seconds:
+            return
+        expires_at = time.monotonic() + (self._fresh_seconds - age)
+        with self._lock:
+            # PC2 may return the same cached sample on consecutive polls.
+            if self._reading is None or captured_at != self._reading[1]["captured_at"]:
+                self._reading = (expires_at, reading)
 
     def _poll_loop(self) -> None:
         while not self._stop.wait(self._interval):
-            reading = self._fetch()
-            if reading is not None:
-                with self._lock:
-                    self._reading = (time.monotonic(), reading)
+            self._poll_once()
 
     def start(self) -> "AgentEnvironment":
         threading.Thread(target=self._poll_loop, name="h2-environment-poll", daemon=True).start()
@@ -174,7 +193,7 @@ class AgentEnvironment:
     def sample(self) -> dict | None:
         with self._lock:
             reading = self._reading
-        if reading is None or time.monotonic() - reading[0] > self._fresh_seconds:
+        if reading is None or time.monotonic() > reading[0]:
             return None
         return reading[1]
 
@@ -290,6 +309,8 @@ class H2HardwareGateway:
                 if reading is not None:
                     state["temperature_c"] = reading["temperature_c"]
                     state["humidity_percent"] = reading["humidity_percent"]
+                    if "captured_at" in reading:
+                        state["environment_captured_at"] = reading["captured_at"]
             if self._battery is not None:
                 percent = self._battery.battery()
                 if percent is not None:

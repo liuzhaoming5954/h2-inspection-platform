@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
@@ -70,13 +70,31 @@ const hardwareStateNames: Record<string, string> = { ready: '可遥控', not_rea
 const hardwareState = computed(() => robotAvailable.value && robot.value?.simulated === false && robot.value.status
   ? hardwareStateNames[robot.value.status] ?? '状态未知'
   : '未连接')
-// Hardware mode reads ambient values from the live robot state (PC2 RS-485
-// sensor via the gateway); simulation keeps using task samples.
-const hardwareEnvironment = computed(() => hardwareMode.value && robot.value?.simulated === false)
-const environmentTemperature = computed(() => hardwareEnvironment.value ? robot.value?.temperature_c ?? null : latestSample.value?.temperature_c ?? null)
-const environmentHumidity = computed(() => hardwareEnvironment.value ? robot.value?.humidity_percent ?? null : latestSample.value?.humidity_percent ?? null)
-const environmentNote = computed(() => hardwareEnvironment.value
-  ? environmentTemperature.value != null ? '机身温湿度传感器 · 实测' : '等待传感器数据'
+const environmentFreshnessMs = 8000
+const environmentCapturedAt = computed(() => {
+  const state = robot.value
+  if (!hardwareMode.value || !connected.value || !state || state.status === 'offline'
+    || !Number.isFinite(state.temperature_c) || !Number.isFinite(state.humidity_percent)) return null
+  const capturedAt = state.environment_captured_at
+  return typeof capturedAt === 'number' && Number.isFinite(capturedAt) && capturedAt > 0 ? capturedAt : null
+})
+const freshEnvironmentCapturedAt = ref<number | null>(null)
+watch(environmentCapturedAt, (capturedAt, _, onCleanup) => {
+  freshEnvironmentCapturedAt.value = null
+  if (capturedAt === null) return
+  // Use the PC2 capture time so polling never extends the sample's lifetime.
+  const ageMs = Date.now() - capturedAt * 1000
+  if (ageMs < 0 || ageMs >= environmentFreshnessMs) return
+  freshEnvironmentCapturedAt.value = capturedAt
+  const timer = setTimeout(() => { freshEnvironmentCapturedAt.value = null }, Math.ceil(environmentFreshnessMs - ageMs))
+  onCleanup(() => clearTimeout(timer))
+})
+const hardwareEnvironment = computed(() => freshEnvironmentCapturedAt.value !== null
+  && environmentCapturedAt.value === freshEnvironmentCapturedAt.value ? robot.value : null)
+const environmentTemperature = computed(() => hardwareMode.value ? hardwareEnvironment.value?.temperature_c ?? null : latestSample.value?.temperature_c ?? null)
+const environmentHumidity = computed(() => hardwareMode.value ? hardwareEnvironment.value?.humidity_percent ?? null : latestSample.value?.humidity_percent ?? null)
+const environmentNote = computed(() => hardwareMode.value
+  ? hardwareEnvironment.value ? '机身传感器 · 实测' : '等待传感器数据'
   : latestSample.value ? `${latestSample.value.label ?? latestSample.value.point_id} · 合成采样` : '任务执行后显示采集结果')
 const taskState = computed(() => selectedTask.value ? stateNames[selectedTask.value.status] ?? selectedTask.value.status : '等待下发')
 const stateTone = computed(() => selectedTask.value?.status === 'completed' ? 'success' : active.value ? 'primary' : selectedTask.value ? 'warning' : 'info')
@@ -262,7 +280,7 @@ onBeforeUnmount(() => {
         <div v-else-if="modeKnown" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
         <div v-if="connectionError" class="connection-alert" role="alert"><strong>服务连接异常</strong><span>{{ connectionError }}</span><button @click="refreshAll">重新连接</button></div>
 
-        <section v-if="modeKnown" class="metrics" :class="{ 'hardware-metrics': hardwareMode }" :aria-label="hardwareMode ? '真机连接与遥控状态' : '机器人与任务概况'">
+        <section v-if="modeKnown" class="metrics" :aria-label="hardwareMode ? '真机连接与遥控状态' : '机器人与任务概况'">
           <div class="metric-card"><div class="metric-top"><span>机器人连接</span><span class="metric-icon">⌁</span></div><div class="metric-value connection-value"><span :class="['status-dot', connected ? 'online' : 'offline']"></span>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</div><div class="metric-foot">{{ connected ? (robot?.robot_id ?? (hardwareMode ? 'H2 真机' : 'H2 模拟机器人')) : '等待业务服务和网关' }}</div></div>
           <div v-if="hardwareMode" class="metric-card">
             <div class="metric-top"><span>高层运动服务</span><span class="metric-icon">◎</span></div>
@@ -277,7 +295,7 @@ onBeforeUnmount(() => {
           <div v-if="hardwareMode" class="metric-card">
             <div class="metric-top"><span>环境温湿度</span><span class="metric-icon">♧</span></div>
             <div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div>
-            <div class="metric-foot">{{ environmentTemperature != null ? '机身传感器 · 实测' : '等待传感器数据' }}</div>
+            <div class="metric-foot">{{ environmentNote }}</div>
           </div>
           <template v-else>
             <div class="metric-card"><div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div><div class="metric-value">{{ battery === undefined ? '—' : battery.toFixed(0) }}<span class="metric-unit">%</span><span class="small-status">{{ robot?.status ? stateNames[robot.status] ?? robot.status : '状态未知' }}</span></div><div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div></div>
@@ -287,8 +305,20 @@ onBeforeUnmount(() => {
         </section>
 
         <div v-if="modeKnown" class="workspace-grid" :class="{ 'hardware-workspace': hardwareMode }">
-          <section v-if="!hardwareMode" class="panel scene-panel"><div class="panel-heading"><div><h2>机房巡检场景</h2><span class="panel-caption">三维位姿与任务路线</span></div><span class="view-badge">3D 实时视图</span></div><RoomScene :robot="robot" :points="points" :progress="progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
+          <section v-if="hardwareMode" class="panel hardware-map" aria-labelledby="hardware-map-heading">
+            <div class="panel-heading">
+              <div><h2 id="hardware-map-heading">地图显示</h2><span class="panel-caption">现场地图与机器人位姿</span></div>
+            </div>
+            <div class="monitor-placeholder map-placeholder">等待地图数据接入</div>
+          </section>
+          <section v-else class="panel scene-panel"><div class="panel-heading"><div><h2>机房巡检场景</h2><span class="panel-caption">三维位姿与任务路线</span></div><span class="view-badge">3D 实时视图</span></div><RoomScene :robot="robot" :points="points" :progress="progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
+          <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
+            <div class="panel-heading">
+              <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">机器人摄像头</span></div>
+            </div>
+            <div class="monitor-placeholder">等待相机画面接入</div>
+          </section>
         </div>
 
         <template v-if="modeKnown && !hardwareMode">
@@ -312,7 +342,31 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.hardware-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.hardware-workspace { grid-template-columns: minmax(0, 1fr); }
+.hardware-workspace {
+  align-items: start;
+  grid-template-areas: 'map teleop' 'image teleop';
+}
+.hardware-map { grid-area: map; }
+.hardware-image { grid-area: image; }
+.hardware-workspace > .teleop-panel { grid-area: teleop; }
+@media (max-width: 800px) {
+  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image'; }
+}
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
+.monitor-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: clamp(144px, 16vw, 248px);
+  padding: 16px;
+  background-color: #f2f6f8;
+  color: #536b7b;
+  font-size: 12px;
+  text-align: center;
+}
+.map-placeholder {
+  background-image: linear-gradient(#e4ecf1 1px, transparent 1px),
+    linear-gradient(90deg, #e4ecf1 1px, transparent 1px);
+  background-position: center;
+  background-size: 24px 24px;
+}
 </style>

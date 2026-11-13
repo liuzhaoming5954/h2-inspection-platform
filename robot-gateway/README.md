@@ -38,4 +38,9 @@ SQLite仅为网关本地命令/结果日志；业务平台使用PostgreSQL。重
 
 模拟遥控使用 `teleop_acquire()`、`teleop_command(token, sequence, action, expires_at_ms)` 和 `teleop_release(token)`。网关独占仲裁人工遥控与巡检；只有有效会话能发送严格递增的序号，状态快照不携带令牌。支持 `forward`、`backward`、`turn_left`、`turn_right`、`stop`、`heartbeat`。各请求只接受未来最多500毫秒的截止时间。租约2秒，心跳只续租约，方向动作最多450毫秒；动作失效即停止并撤销租约。独立监视线程无需轮询请求即可生效。停止后保持当前位置，`yaw`为弧度，零沿+x、左转增加。租约与动作不写入SQLite，重启不会恢复。
 
-gRPC 使用本机回环连接。真机模式只开放手动遥控和 FSM 状态查询，禁用巡检任务。SDK 的停步回执表示零速度请求已应答，物理停稳和断链后的表现以现场验收结果为准。
+gRPC 使用本机回环连接。真机模式支持手动遥控、FSM 状态查询、PC2 温湿度及 PC3 BMS 电量遥测，巡检任务仅在模拟模式开放。
+
+- PC2 运行 `scripts/sensor_agent_pc2.py`，通过 `pyserial` 读取 RS-485 传感器。PC3 通过 `H2_SENSOR_AGENT_URL` 轮询代理的 `/environment`。`get_state()` 中的 `environment_captured_at` 保留 PC2 的原始采样时间（Unix 秒）。真机页面按原始时间计时，满 8 秒即清除温湿度和「实测」标记，重复轮询不会续期。
+- PC3 通过 SDK2 订阅 DDS 话题 `rt/lf/bmsstate`，将 `soc` 作为 `battery_percent` 上报。无数据或读数超过 5 秒时，电量显示 `—`。
+
+PC3 网关与上位机使用同一代码提交，PC2、PC3 和上位机同步系统时钟。SDK 的停步回执表示零速度请求已应答。本版本的温湿度到期与恢复、遥控方向、实际停稳、释放控制权和断链行为仍待真机验收。[H2 真机遥控现场联调](H2_COMMISSIONING.md)
