@@ -73,6 +73,18 @@ else
     && echo "   started" || echo "   FAILED (PC2 offline?)"
 fi
 
+echo "== 1.5/4 PC3 read-only FSM probe (checklist: switch H2 to 601 FIRST) =="
+PROBE=$(sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
+  "cd ~/h2-inspection-platform && CYCLONEDDS_HOME=\$PWD/.runtime/h2-sdk2/cyclonedds-install timeout 20 .venv/bin/python -m h2_gateway.hardware --interface eth10 2>/dev/null" \
+  </dev/null 2>/dev/null)
+if echo "$PROBE" | grep -q '"teleop_ready": true'; then
+  echo "   probe: $PROBE (601 standing, ready)"
+else
+  echo "   probe: ${PROBE:-unreachable} — H2 not in 601 yet."
+  echo "   NOTE: the field checklist switches H2 to 601 BEFORE the gateway starts."
+  echo "   Continuing (telemetry works regardless); teleop unlocks at 601."
+fi
+
 echo "== 2/4 PC3 gateway =="
 if sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
     'pgrep -f "[h]2_gateway.server" >/dev/null' 2>/dev/null; then
