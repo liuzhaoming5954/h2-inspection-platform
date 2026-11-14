@@ -27,6 +27,16 @@ STATE_MAX_AGE = 0.8
 DEFAULT_SENSOR_AGENT_URL = "http://192.168.124.162:8090/environment"
 MAX_VELOCITY_DURATION = 0.25
 MIN_VELOCITY_DURATION = 0.04
+# Cross-clock tolerance: the workstation and PC3 follow different time
+# sources (the robot runs chrony against robot-internal time) and may drift
+# or slew apart by hundreds of milliseconds. The backend already validates
+# command freshness against the browser on the same host, so this gateway
+# only rejects skews beyond this tolerance — never healthy commands.
+# Safety invariants that stay untouched: 250 ms max motion per frame, the
+# 2 s monotonic lease/dead-man, strictly increasing sequences, and the
+# clock-skew exemption for ordered stops.
+CLOCK_SKEW_TOLERANCE_MS = 2000
+GATEWAY_MAX_FUTURE_MS = MAX_COMMAND_FUTURE_MS + CLOCK_SKEW_TOLERANCE_MS
 
 # Initial supervised trial limits. The H2's built-in controller owns gait and balance.
 VELOCITIES = {
@@ -346,12 +356,16 @@ class H2HardwareGateway:
             if sequence <= self._sequence:
                 return teleop_reply(False, "stale_sequence", "teleop sequence must strictly increase")
             remaining_ms = expires_at_ms - time.time_ns() // 1_000_000
-            # An ordered stop from the current owner must survive clock skew
-            # between the workstation and PC3. Direction/heartbeat still expire.
+            # Freshness was already validated by the backend against the
+            # browser on the same host. This cross-clock re-check only
+            # rejects skews beyond CLOCK_SKEW_TOLERANCE_MS (a wrong time
+            # domain), never healthy commands: an ordered stop stays fully
+            # exempt, stale movement still dies on the zero-duration clamp
+            # below, and only heartbeats need the explicit stale bound.
             if action != "stop":
-                if remaining_ms > MAX_COMMAND_FUTURE_MS:
+                if remaining_ms > GATEWAY_MAX_FUTURE_MS:
                     return teleop_reply(False, "invalid_expiry", "teleop deadline is too far in the future")
-                if remaining_ms <= 0:
+                if action == "heartbeat" and remaining_ms <= -CLOCK_SKEW_TOLERANCE_MS:
                     return teleop_reply(False, "expired", "teleop command has expired")
             self._sequence = sequence
             self._lease_until = now + LEASE_SECONDS

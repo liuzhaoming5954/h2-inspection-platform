@@ -58,7 +58,8 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     token = gateway.teleop_acquire()["token"]
     assert gateway.teleop_acquire()["code"] == "teleop_busy"
     assert send(gateway, token, 1, "forward", ttl=-1)["code"] == "expired"
-    assert send(gateway, token, 2, "forward", ttl=750)["code"] == "invalid_expiry"
+    # Future bound is clock-skew tolerant; 3 s ahead is still absurd.
+    assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert loco.commands.empty()
     assert send(gateway, token, 3, "forward")["accepted"]
     speed, duration = loco.commands.get(timeout=1)
@@ -111,7 +112,9 @@ def test_clock_skew_never_blocks_an_ordered_stop_from_the_owner(hardware):
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "forward")["accepted"]
     assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
-    assert send(gateway, token, 2, "forward", ttl=1200)["code"] == "invalid_expiry"
+    # A skewed far-future deadline still cannot move the robot, but an
+    # ordered stop under the same skew must go through.
+    assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert send(gateway, "wrong-token", 2, "stop", ttl=1200)["code"] == "invalid_token"
     assert send(gateway, token, 1, "stop", ttl=1200)["code"] == "stale_sequence"
     assert send(gateway, token, 2, "stop", ttl=1200)["code"] == "stopped"
