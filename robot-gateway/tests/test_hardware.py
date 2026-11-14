@@ -67,8 +67,12 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     assert 0 < duration <= 0.25
     assert send(gateway, token, 3, "backward")["code"] == "stale_sequence"
     assert send(gateway, token, 4, "heartbeat")["accepted"]
+    # Motion-frame expiry halts motion (heartbeat cannot extend a frame)…
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
-    assert send(gateway, token, 5, "forward")["code"] == "invalid_token"
+    # …but no longer revokes the lease: a fresh motion command resumes.
+    assert send(gateway, token, 5, "forward")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
     assert gateway.get_state()["motion"] == "stop_requested"
     assert loco.commands.empty()
 

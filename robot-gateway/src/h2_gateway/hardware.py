@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 from xml.etree import ElementTree
 
-from h2_gateway.teleop import ACTIONS, LEASE_SECONDS, MAX_COMMAND_FUTURE_MS, TICK_SECONDS, teleop_reply
+from h2_gateway.teleop import ACTIONS, DIRECTIONS, LEASE_SECONDS, MAX_COMMAND_FUTURE_MS, TICK_SECONDS, teleop_reply
 
 
 LOG = logging.getLogger(__name__)
@@ -260,10 +260,17 @@ class H2HardwareGateway:
         return not self._stop_needed or self._stop()
 
     def _expire(self, now: float) -> None:
-        if self._token and (now >= self._lease_until
-                            or (self._motion_until and now >= self._motion_until)
-                            or not self._ready(now)):
+        if self._token and (now >= self._lease_until or not self._ready(now)):
             self._revoke()
+        elif self._motion_until and now >= self._motion_until:
+            # A motion frame's validity lapsed without a successor frame.
+            # Halt motion immediately (per-frame dead-man) but keep the
+            # lease: the 2 s heartbeat deadline owns revocation. Coupling
+            # the two killed healthy sessions whenever the frontend's next
+            # frame crossed the tunnel after 250 ms.
+            self._motion_until = 0.0
+            if self._motion in DIRECTIONS:
+                self._stop()  # failure latches stop_fault and revokes via _ready
 
     def _watch(self) -> None:
         next_poll = 0.0
@@ -275,8 +282,12 @@ class H2HardwareGateway:
                 self._expire(now)
                 if now < next_poll:
                     continue
-                # Let stop and refreshed velocity take priority near the current motion deadline.
-                if self._motion_until and self._motion_until - now <= 2 * SDK_TIMEOUT:
+                # Let stop and refreshed velocity take priority near the current
+                # motion deadline — but never let sustained motion frames starve
+                # the FSM poll: a stale state would revoke a healthy lease via
+                # _ready() and did so whenever frame gaps stayed under 250 ms.
+                if (self._motion_until and self._motion_until - now <= 2 * SDK_TIMEOUT
+                        and now - self._state_at < STATE_MAX_AGE / 2):
                     continue
                 try:
                     self._fsm = self._loco.fsm()
@@ -391,9 +402,13 @@ class H2HardwareGateway:
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
                 return teleop_reply(False, "sdk_rejected", "H2 velocity request was not acknowledged")
             if time.monotonic() >= self._motion_until:
-                if not self._revoke():
+                # The SDK acknowledged after this frame's window; the watchdog
+                # may already have sent zero velocity mid-RPC, so re-assert the
+                # stop. The lease itself stays with the 2 s heartbeat deadline:
+                # a slow acknowledgement must not strand the operator.
+                if not self._stop():
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
-                return teleop_reply(False, "invalid_token", "H2 velocity acknowledgement arrived after its deadline")
+                return teleop_reply(True, "stopped", "H2 acknowledged a late frame; motion halted", token)
             self._motion = action
             return teleop_reply(True, "applied", "H2 acknowledged velocity request", token)
 

@@ -54,15 +54,20 @@ const note = computed(() => feedback.value || props.disabledReason || (active.va
   ? (props.hardware ? '按住方向按钮发送运动指令，松开发送停步请求。' : '按住方向按钮，或聚焦此区域后使用方向键。松开即停步。')
   : (props.hardware ? '机器人进入可遥控状态后，申请控制权并按住方向按钮。' : '申请控制权后，按住方向按钮控制模拟机器人。')))
 
-// Keep only one ordinary command awaiting an acknowledgement; stop and release
-// bypass that slot so a slow response cannot delay the operator's stop request.
+// Movement frames are pipelined: the gateway bounds each frame to 250 ms, so a
+// strict one-outstanding rule let the acknowledgement round trip (browser ->
+// backend -> SSH forward -> PC3 -> DDS and back, 150-300 ms in the field)
+// starve the motion window and stall the robot. Keep a fixed 100 ms cadence
+// with a small outstanding cap instead; sequences stay strictly increasing.
+// Stop and release still go through send() directly and are never queued.
 const MOVEMENT_INTERVAL_MS = 100
 const HEARTBEAT_INTERVAL_MS = 400
 const ACK_TIMEOUT_MS = 500
 const MAX_TIMER_GAP_MS = 350
+const MAX_INFLIGHT_MOVEMENT = 3
 let socket: WebSocket | undefined
 let sequence = 0
-let pending: { sequence: number; action: Action; at: number } | undefined
+let inflight: Array<{ sequence: number; action: Action; at: number }> = []
 let held: Hold | undefined
 let lastSentAt = 0
 let lastTickAt = 0
@@ -91,7 +96,7 @@ function endSession(message: string, isWarning = false) {
   clearInterval(timer)
   clearTimeout(acquireTimer)
   clearHold()
-  pending = undefined
+  inflight = []
   if (transport) {
     if (hadLease && transport.readyState === WebSocket.OPEN) {
       try {
@@ -114,7 +119,7 @@ function send(action: Action) {
   }
   try {
     const now = performance.now()
-    pending = { sequence: transmit(transport, action), action, at: now }
+    inflight.push({ sequence: transmit(transport, action), action, at: now })
     lastSentAt = now
   } catch {
     endSession('指令发送失败，遥控会话已结束。', true)
@@ -124,14 +129,15 @@ function send(action: Action) {
 function stopMotion(force = false) {
   const wasHeld = !!held
   clearHold()
-  if (!active.value || (!force && !wasHeld) || pending?.action === 'stop') return
+  if (!active.value || (!force && !wasHeld) || inflight.some(f => f.action === 'stop')) return
   send('stop')
 }
 
 function tick() {
   if (!active.value) return
   const now = performance.now()
-  if (now - lastTickAt >= MAX_TIMER_GAP_MS || (pending && now - pending.at >= ACK_TIMEOUT_MS)) {
+  const oldest = inflight[0]
+  if (now - lastTickAt >= MAX_TIMER_GAP_MS || (oldest && now - oldest.at >= ACK_TIMEOUT_MS)) {
     endSession('遥控响应超时，会话已结束。请重新申请控制权。', true)
     return
   }
@@ -140,10 +146,12 @@ function tick() {
     endSession('遥控连接已断开，请重新申请控制权。', true)
     return
   }
-  if (pending || socket.bufferedAmount > 0) return
   const movement = canMove.value ? direction.value : null
-  const interval = movement ? MOVEMENT_INTERVAL_MS : HEARTBEAT_INTERVAL_MS
-  if (now - lastSentAt >= interval) send(movement ?? 'heartbeat')
+  if (movement) {
+    if (inflight.length < MAX_INFLIGHT_MOVEMENT && now - lastSentAt >= MOVEMENT_INTERVAL_MS) send(movement)
+  } else if (inflight.length === 0 && now - lastSentAt >= HEARTBEAT_INTERVAL_MS) {
+    send('heartbeat')
+  }
 }
 
 function parseReply(raw: unknown): Reply | undefined {
@@ -199,8 +207,8 @@ function acquire() {
       lastTickAt = lastSentAt = performance.now()
       timer = setInterval(tick, 25)
       void nextTick(() => { if (active.value) pad.value?.focus({ preventScroll: true }) })
-    } else if (reply.type === 'ack' && reply.sequence === pending?.sequence) {
-      pending = undefined
+    } else if (reply.type === 'ack' && typeof reply.sequence === 'number') {
+      inflight = inflight.filter(frame => frame.sequence !== reply.sequence)
     }
   })
   const connectionLost = () => {
