@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import threading
@@ -22,6 +23,7 @@ from h2_gateway.hardware import (
     BmsWatcher,
     H2HardwareGateway,
     UnitreeLoco,
+    emit_event,
 )
 
 
@@ -149,6 +151,16 @@ def main() -> None:
             parser.error(str(error))
     else:
         engine = SimulatorEngine(args.db, step_delay=args.step_delay)
+    if args.h2_interface:
+        # Only the gateway package logs events; leave grpc at WARNING. The
+        # wall-clock stamp anchors the monotonic event timeline for offline
+        # analysis of frame continuity and stop latency.
+        events = logging.getLogger("h2_gateway")
+        events.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        events.addHandler(handler)
+        emit_event({"event": "clock_base", "unix_ms": time.time_ns() // 1_000_000})
     stop = threading.Event()
 
     def request_stop(*_: object) -> None:

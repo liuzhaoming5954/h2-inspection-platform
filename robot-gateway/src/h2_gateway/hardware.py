@@ -21,6 +21,16 @@ from h2_gateway.teleop import ACTIONS, DIRECTIONS, LEASE_SECONDS, TICK_SECONDS, 
 
 
 LOG = logging.getLogger(__name__)
+
+
+def emit_event(fields: dict) -> None:
+    # Field-diagnosis events: one JSON object per line, stamped with this
+    # machine's monotonic clock, so frame continuity, SDK acknowledgement
+    # latency and every zero-velocity request can be measured offline
+    # without any cross-device clock sync. The server enables INFO logging
+    # for the h2_gateway package; unit tests read the same records.
+    fields["mono_ms"] = time.monotonic_ns() // 1_000_000
+    LOG.info("h2_event %s", json.dumps(fields, sort_keys=True))
 MAIN_FSM = 601
 STANDING = 0
 MOVING = 1
@@ -292,29 +302,37 @@ class H2HardwareGateway:
                 and self._fsm is not None and now - self._state_at <= STATE_MAX_AGE
                 and self._fsm[0] == MAIN_FSM and self._fsm[1] in modes)
 
-    def _stop(self) -> bool:
+    def _stop(self, reason: str) -> bool:
         self._motion_until = 0.0
+        sent_ns = time.monotonic_ns()
         try:
             self._loco.velocity(0.0, 0.0, 0.0, MAX_VELOCITY_DURATION)
         except Exception as error:
+            emit_event({"event": "zero_velocity", "reason": reason, "ack": False,
+                        "error": str(error)[:120]})
             LOG.error("H2 stop request was not acknowledged: %s", error)
             self._motion = "unknown"
             self._stop_needed = True
             self._stop_fault = True
             return False
+        emit_event({"event": "zero_velocity", "reason": reason, "ack": True,
+                    "sdk_ms": round((time.monotonic_ns() - sent_ns) / 1e6, 1)})
         self._stop_needed = False
         self._motion = "stop_requested"
         return True
 
-    def _revoke(self) -> bool:
+    def _revoke(self, reason: str) -> bool:
+        emit_event({"event": "lease", "change": "revoked", "reason": reason})
         self._token = ""
         self._lease_until = 0.0
         self._sequence = 0
-        return not self._stop_needed or self._stop()
+        return not self._stop_needed or self._stop(reason)
 
     def _expire(self, now: float) -> None:
-        if self._token and (now >= self._lease_until or not self._ready(now)):
-            self._revoke()
+        if self._token and now >= self._lease_until:
+            self._revoke("lease_expired")
+        elif self._token and not self._ready(now):
+            self._revoke("not_ready")
         elif self._motion_until and now >= self._motion_until:
             # A motion frame's validity lapsed without a successor frame.
             # Halt motion immediately (per-frame dead-man) but keep the
@@ -323,7 +341,7 @@ class H2HardwareGateway:
             # frame crossed the tunnel after 250 ms.
             self._motion_until = 0.0
             if self._motion in DIRECTIONS:
-                self._stop()  # failure latches stop_fault and revokes via _ready
+                self._stop("frame_expired")  # failure latches stop_fault and revokes via _ready
 
     def _watch(self) -> None:
         next_poll = 0.0
@@ -421,7 +439,12 @@ class H2HardwareGateway:
                 return teleop_reply(False, "robot_not_ready", "H2 must be standing in main locomotion mode")
             self._token = secrets.token_urlsafe(24)
             self._lease_until = now + LEASE_SECONDS
+            emit_event({"event": "lease", "change": "acquired"})
             return teleop_reply(True, "acquired", "H2 teleop control acquired", self._token)
+
+    def _reject(self, sequence: int, action: str, code: str, message: str) -> dict:
+        emit_event({"event": "teleop_reject", "seq": sequence, "action": action[:40], "code": code})
+        return teleop_reply(False, code, message)
 
     def teleop_command(self, token: str, sequence: int, action: str, gateway_deadline_ms: int | None,
                        *, is_active: Callable[[], bool] | None = None) -> dict:
@@ -430,30 +453,32 @@ class H2HardwareGateway:
             now = time.monotonic()
             self._expire(now)
             if self._stop_fault:
-                return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
+                return self._reject(sequence, action, "stop_unconfirmed", "H2 stop was not acknowledged")
             if not self._token or token != self._token:
-                return teleop_reply(False, "invalid_token", "H2 teleop control is no longer held")
+                return self._reject(sequence, action, "invalid_token", "H2 teleop control is no longer held")
             if action not in ACTIONS:
-                return teleop_reply(False, "invalid_action", "unsupported H2 teleop action")
+                return self._reject(sequence, action, "invalid_action", "unsupported H2 teleop action")
             if sequence <= self._sequence:
-                return teleop_reply(False, "stale_sequence", "teleop sequence must strictly increase")
+                return self._reject(sequence, action, "stale_sequence", "teleop sequence must strictly increase")
             # A stop from the current lease remains valid even when delayed.
             if action != "stop":
                 if is_active is not None and not is_active():
-                    return teleop_reply(False, "expired", "teleop request was cancelled before SDK admission")
+                    return self._reject(sequence, action, "expired",
+                                        "teleop request was cancelled before SDK admission")
                 if gateway_deadline_ms is None:
-                    return teleop_reply(False, "invalid_expiry", "PC3 monotonic deadline is required")
+                    return self._reject(sequence, action, "invalid_expiry", "PC3 monotonic deadline is required")
                 remaining_ms = gateway_deadline_ms - (time.monotonic_ns() + 999_999) // 1_000_000
                 if remaining_ms > MAX_HARDWARE_COMMAND_MS:
-                    return teleop_reply(False, "invalid_expiry", "teleop deadline is too far in the future")
+                    return self._reject(sequence, action, "invalid_expiry",
+                                        "teleop deadline is too far in the future")
                 if remaining_ms <= 0 or (action != "heartbeat" and remaining_ms < MIN_VELOCITY_DURATION * 1000):
-                    return teleop_reply(False, "expired", "teleop command has expired")
+                    return self._reject(sequence, action, "expired", "teleop command has expired")
             self._sequence = sequence
             self._lease_until = time.monotonic() + LEASE_SECONDS
             if action == "heartbeat":
                 return teleop_reply(True, "renewed", "H2 teleop lease renewed", token)
             if action == "stop":
-                if self._stop():
+                if self._stop("stop"):
                     return teleop_reply(True, "stopped", "H2 acknowledged zero velocity", token)
                 self._token = ""
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
@@ -462,20 +487,27 @@ class H2HardwareGateway:
             # Once sent, an RPC timeout cannot distinguish a lost response from lost delivery.
             self._stop_needed = True
             self._motion_until = min(time.monotonic() + duration, gateway_deadline_ms / 1000)
+            frame = {"event": "teleop_frame", "seq": sequence, "action": action,
+                     "remaining_ms": remaining_ms, "duration_ms": round(duration * 1000, 1)}
+            sent_ns = time.monotonic_ns()
             try:
                 self._loco.velocity(*VELOCITIES[action], duration)
             except Exception as error:
                 LOG.warning("H2 velocity request was not acknowledged: %s", error)
-                if not self._revoke():
+                emit_event({**frame, "ack": False, "error": str(error)[:120]})
+                if not self._revoke("sdk_rejected"):
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
                 return teleop_reply(False, "sdk_rejected", "H2 velocity request was not acknowledged")
+            frame["sdk_ms"] = round((time.monotonic_ns() - sent_ns) / 1e6, 1)
             if time.monotonic() >= self._motion_until:
                 # The SDK acknowledged after this frame's window. Send zero
                 # while this command still owns the lock and keep the lease.
-                if not self._stop():
+                if not self._stop("late_frame"):
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
+                emit_event({**frame, "result": "late_ack_zeroed"})
                 return teleop_reply(True, "stopped", "H2 acknowledged a late frame; motion halted", token)
             self._motion = action
+            emit_event({**frame, "result": "applied"})
             return teleop_reply(True, "applied", "H2 acknowledged velocity request", token)
 
     def teleop_release(self, token: str) -> dict:
@@ -484,14 +516,15 @@ class H2HardwareGateway:
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
             if not self._token or token != self._token:
                 return teleop_reply(False, "invalid_token", "H2 teleop control is no longer held")
-            if not self._revoke():
+            if not self._revoke("release"):
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
             return teleop_reply(True, "released", "H2 teleop control released")
 
     def close(self) -> None:
         self._shutdown.set()
         with self._lock.hold(_SDKLock.SAFETY):
-            self._revoke()
+            if self._token:
+                self._revoke("shutdown")
         self._worker.join()
         if self._environment is not None:
             self._environment.close()
