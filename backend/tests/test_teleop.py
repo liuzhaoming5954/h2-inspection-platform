@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from h2_backend.app import create_app
 from h2_backend.models import Base, Outbox, Task
+from h2_backend import teleop as teleop_module
 
 
 PATH = "ws://127.0.0.1:8000/api/teleop/ws"
@@ -41,11 +42,16 @@ class TeleopBoundary:
         self.released = Event()
         self.timeout_at = None
         self.command_failure = None
+        self.clock_offset_ms = 0
 
-    @staticmethod
-    def response(accepted, code):
-        return {"accepted": accepted, "code": code, "message": f"internal details {PRIVATE_TOKEN}",
-                "token": PRIVATE_TOKEN}
+    def response(self, accepted, code):
+        reply = {"accepted": accepted, "code": code, "message": f"internal details {PRIVATE_TOKEN}",
+                 "token": PRIVATE_TOKEN}
+        if not self.simulated:
+            stamp = time.monotonic_ns()
+            reply.update(gateway_monotonic_ms=stamp // 1_000_000 + self.clock_offset_ms,
+                         received_monotonic_ns=stamp)
+        return reply
 
     def get_state(self):
         state = self.state()
@@ -65,7 +71,10 @@ class TeleopBoundary:
         self.active = True
         return self.response(True, "acquired")
 
-    def command(self, token, sequence, action, expires_at_ms):
+    def command(self, token, sequence, action, expires_at_ms, **options):
+        if not self.simulated and action not in ("stop", "release"):
+            assert not expires_at_ms and options["gateway_deadline_ms"] > 0
+            assert 0 < options["timeout"] <= 0.35
         self.commands.append((token, sequence, action, expires_at_ms))
         if self.timeout_at == "command":
             raise TimeoutError(f"internal details {PRIVATE_TOKEN}")
@@ -148,6 +157,147 @@ def test_hardware_ack_distinguishes_request_from_measured_motion(hardware_client
         stop = send(socket, "stop", 2)
         assert stop["code"] == "stopped" and stop["message"] == "H2 已接收停步请求。"
         assert send(socket, "release", 3)["accepted"]
+    assert teleop.releases == [PRIVATE_TOKEN]
+
+
+@pytest.mark.parametrize("priority,final_code", [("stop", "stopped"), ("release", "released")])
+def test_hardware_priority_discards_queued_motion(hardware_client, teleop, monkeypatch, priority, final_code):
+    first_started = Event()
+    finish_first = Event()
+
+    def command(*args, **kwargs):
+        if args[1] == 1:
+            first_started.set()
+            assert finish_first.wait(2)
+        return teleop.command(*args, **kwargs)
+
+    monkeypatch.setattr(teleop.gateway, "teleop_command", command)
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        try:
+            assert socket.receive_json()["code"] == "acquired"
+            socket.send_json({"action": "forward", "sequence": 1, "sent_at_ms": now_ms()})
+            assert first_started.wait(1)
+
+            socket.send_json({"action": "forward", "sequence": 2, "sent_at_ms": now_ms()})
+            socket.send_json({"action": "turn_right", "sequence": 3, "sent_at_ms": now_ms()})
+            dropped = socket.receive_json()
+            assert (dropped["code"], dropped["sequence"]) == ("superseded", 2)
+
+            socket.send_json({"action": priority, "sequence": 4, "sent_at_ms": 0})
+            dropped = socket.receive_json()
+            assert (dropped["code"], dropped["sequence"]) == ("superseded", 3)
+
+            if priority == "stop":
+                socket.send_json({"action": "forward", "sequence": 5, "sent_at_ms": now_ms()})
+                dropped = socket.receive_json()
+                assert (dropped["code"], dropped["sequence"]) == ("superseded", 5)
+
+            finish_first.set()
+            assert socket.receive_json()["code"] == "applied"
+            priority_reply = socket.receive_json()
+            assert (priority_reply["code"], priority_reply["sequence"]) == (final_code, 4)
+            expected = [(1, "forward"), (4, "stop")] if priority == "stop" else [(1, "forward")]
+            assert [(item[1], item[2]) for item in teleop.commands] == expected
+
+            if priority == "stop":
+                assert send(socket, "turn_left", 6)["code"] == "applied"
+                assert send(socket, "release", 7)["code"] == "released"
+        finally:
+            finish_first.set()
+    assert teleop.releases == [PRIVATE_TOKEN]
+
+
+def test_hardware_late_direction_stop_ack_keeps_session(hardware_client, teleop, monkeypatch):
+    def command(*args, **kwargs):
+        if args[2] == "forward":
+            return teleop.response(True, "stopped")
+        return teleop.command(*args, **kwargs)
+
+    monkeypatch.setattr(teleop.gateway, "teleop_command", command)
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        assert socket.receive_json()["code"] == "acquired"
+        late = send(socket, "forward", 1)
+        assert late["accepted"] and late["code"] == "stopped"
+        assert send(socket, "heartbeat", 2)["code"] == "renewed"
+        assert send(socket, "release", 3)["code"] == "released"
+
+
+def test_hardware_translates_to_pc3_monotonic_epoch(hardware_client, teleop, monkeypatch):
+    teleop.clock_offset_ms = 52_000
+
+    def command(token, sequence, action, expires_at_ms, **options):
+        remaining = options["gateway_deadline_ms"] - teleop.clock_offset_ms - time.monotonic_ns() // 1_000_000
+        assert 0 < remaining <= teleop_module.COMMAND_TTL_MS
+        return teleop.command(token, sequence, action, expires_at_ms, **options)
+
+    monkeypatch.setattr(teleop.gateway, "teleop_command", command)
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        lease = socket.receive_json()
+        assert lease["code"] == "acquired" and "gateway_monotonic_ms" not in lease
+        assert send(socket, "forward", 1)["code"] == "applied"
+        assert send(socket, "heartbeat", 2)["code"] == "renewed"
+        assert send(socket, "release", 3)["code"] == "released"
+
+
+def test_hardware_releases_incompatible_legacy_gateway_lease(hardware_client, teleop, monkeypatch):
+    def acquire():
+        reply = teleop.acquire()
+        del reply["gateway_monotonic_ms"], reply["received_monotonic_ns"]
+        return reply
+
+    monkeypatch.setattr(teleop.gateway, "teleop_acquire", acquire)
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        assert socket.receive_json()["code"] == "gateway_protocol_error"
+        assert teleop.released.wait(1)
+    assert not teleop.commands
+
+
+@pytest.mark.parametrize("disconnected", [False, True])
+def test_hardware_does_not_dispatch_queued_motion_after_expiry_or_disconnect(
+        hardware_client, teleop, monkeypatch, disconnected):
+    first_started = Event()
+    finish_first = Event()
+    input_closed = Event()
+    receive_command = teleop_module.receive_command
+
+    def command(*args, **kwargs):
+        if args[1] == 1:
+            first_started.set()
+            assert finish_first.wait(2)
+        return teleop.command(*args, **kwargs)
+
+    async def receive(*args):
+        result = await receive_command(*args)
+        if result is None:
+            input_closed.set()
+        return result
+
+    monkeypatch.setattr(teleop.gateway, "teleop_command", command)
+    monkeypatch.setattr(teleop_module, "receive_command", receive)
+    with hardware_client.websocket_connect(PATH, headers=HEADERS) as socket:
+        try:
+            assert socket.receive_json()["code"] == "acquired"
+            socket.send_json({"action": "forward", "sequence": 1, "sent_at_ms": now_ms()})
+            assert first_started.wait(1)
+            socket.send_json({"action": "forward", "sequence": 2, "sent_at_ms": now_ms()})
+            socket.send_json({"action": "turn_left", "sequence": 3, "sent_at_ms": now_ms()})
+            assert socket.receive_json()["code"] == "superseded"
+
+            if disconnected:
+                socket.close()
+                assert input_closed.wait(1)
+                finish_first.set()
+                assert teleop.released.wait(1)
+            else:
+                time.sleep((teleop_module.COMMAND_TTL_MS + 10) / 1000)
+                finish_first.set()
+                assert socket.receive_json()["code"] == "applied"
+                expired = socket.receive_json()
+                assert (expired["code"], expired["sequence"]) == ("stale_command", 3)
+                assert send(socket, "release", 4)["code"] == "released"
+        finally:
+            finish_first.set()
+    assert [item[1] for item in teleop.commands] == [1]
     assert teleop.releases == [PRIVATE_TOKEN]
 
 

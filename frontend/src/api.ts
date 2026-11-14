@@ -57,6 +57,8 @@ export interface RobotState {
   temperature_c?: number | null
   humidity_percent?: number | null
   environment_captured_at?: number | null
+  environment_sample_id?: string | null
+  environment_remaining_ms?: number | null
   motion?: 'stop' | 'forward' | 'backward' | 'turn_left' | 'turn_right' | 'stop_requested' | 'unknown'
   simulated?: boolean
 }

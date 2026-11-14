@@ -1,10 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
-from threading import Event
+from threading import Event, local
 import time
 
 import pytest
 
-from h2_gateway.hardware import H2HardwareGateway
+from h2_gateway.hardware import H2HardwareGateway, _SDKLock
 from h2_gateway.server import create_server
 
 
@@ -50,7 +51,7 @@ def wait_for(gateway, condition):
 
 
 def send(gateway, token, sequence, action, ttl=350):
-    return gateway.teleop_command(token, sequence, action, time.time_ns() // 1_000_000 + ttl)
+    return gateway.teleop_command(token, sequence, action, time.monotonic_ns() // 1_000_000 + ttl)
 
 
 def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
@@ -58,7 +59,7 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     token = gateway.teleop_acquire()["token"]
     assert gateway.teleop_acquire()["code"] == "teleop_busy"
     assert send(gateway, token, 1, "forward", ttl=-1)["code"] == "expired"
-    # Future bound is clock-skew tolerant; 3 s ahead is still absurd.
+    # A deadline beyond the gateway's command window is invalid.
     assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert loco.commands.empty()
     assert send(gateway, token, 3, "forward")["accepted"]
@@ -111,18 +112,74 @@ def test_wrong_fsm_or_offline_does_not_enable_movement(hardware):
     assert loco.commands.empty()
 
 
-def test_clock_skew_never_blocks_an_ordered_stop_from_the_owner(hardware):
+def test_an_ordered_stop_from_the_owner_needs_no_valid_deadline(hardware):
     gateway, loco = hardware
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "forward")["accepted"]
     assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
-    # A skewed far-future deadline still cannot move the robot, but an
-    # ordered stop under the same skew must go through.
+    # Stop may always use an expired deadline, subject to owner and order.
     assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert send(gateway, "wrong-token", 2, "stop", ttl=1200)["code"] == "invalid_token"
     assert send(gateway, token, 1, "stop", ttl=1200)["code"] == "stale_sequence"
-    assert send(gateway, token, 2, "stop", ttl=1200)["code"] == "stopped"
+    assert gateway.teleop_command(token, 2, "stop", None)["code"] == "stopped"
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
+
+
+@pytest.mark.parametrize("action", ["forward", "heartbeat"])
+def test_cancelled_non_stop_does_not_reach_sdk_or_consume_sequence(hardware, action):
+    gateway, loco = hardware
+    token = gateway.teleop_acquire()["token"]
+    deadline = time.monotonic_ns() // 1_000_000 + 350
+    result = gateway.teleop_command(token, 1, action, deadline, is_active=lambda: False)
+    assert result["code"] == "expired"
+    assert loco.commands.empty()
+    assert gateway.teleop_command(token, 1, "stop", None, is_active=lambda: False)["code"] == "stopped"
+    assert loco.commands.get_nowait()[0] == (0, 0, 0)
+
+
+@pytest.mark.parametrize("direction_sequence", [1, 3])
+def test_queued_stop_then_direction_outrank_status(hardware, monkeypatch, direction_sequence):
+    gateway, loco = hardware
+    token = gateway.teleop_acquire()["token"]
+    lock = gateway._lock
+    thread_state = local()
+    wait_for_lock = lock._changed.wait_for
+
+    def notify_waiting(predicate, timeout=None):
+        waiting = getattr(thread_state, "waiting", None)
+        if waiting is not None:
+            waiting.set()
+        return wait_for_lock(predicate, timeout)
+
+    def submit_waiting(executor, operation, *args):
+        waiting = Event()
+
+        def run():
+            thread_state.waiting = waiting
+            return operation(*args)
+
+        future = executor.submit(run)
+        assert waiting.wait(1), "operation did not reach the SDK lock"
+        return future
+
+    monkeypatch.setattr(lock._changed, "wait_for", notify_waiting)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        # Simulate an already running SDK operation, then queue status,
+        # direction and stop in the opposite order from their priorities.
+        with lock.hold(_SDKLock.SAFETY):
+            status = submit_waiting(executor, gateway.get_state)
+            direction = submit_waiting(executor, send, gateway, token, direction_sequence, "forward")
+            stop = submit_waiting(executor, send, gateway, token, 2, "stop")
+        assert stop.result(timeout=1)["code"] == "stopped"
+        assert loco.commands.get_nowait()[0] == (0, 0, 0)
+        if direction_sequence == 1:
+            assert direction.result(timeout=1)["code"] == "stale_sequence"
+            assert status.result(timeout=1)["motion"] == "stop_requested"
+            assert loco.commands.empty()
+        else:
+            assert direction.result(timeout=1)["code"] == "applied"
+            assert status.result(timeout=1)["motion"] == "forward"
+            assert loco.commands.get_nowait()[0] == (0.15, 0, 0)
 
 
 def test_controller_link_loss_latches_unconfirmed_stop(hardware):

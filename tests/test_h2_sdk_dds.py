@@ -60,11 +60,13 @@ def test_h2_hardware_path_over_loopback_dds(tmp_path, monkeypatch):
         assert 0 < received["duration"] <= 0.25
 
     engine = H2HardwareGateway(loco)
-    gateway_server, port = create_server(engine, port=0)
+    gateway_server, port = create_server(engine, port=0, lane="state")
+    control_server, control_port = create_server(engine, port=0, lane="teleop")
     gateway_server.start()
+    control_server.start()
     address = f"127.0.0.1:{port}"
     settings = Settings(f"sqlite:///{tmp_path / 'platform.sqlite'}", address, tmp_path / "data",
-                        hardware_teleop=True)
+                        hardware_teleop=True, teleop_gateway_address=f"127.0.0.1:{control_port}")
     try:
         with GatewayClient(address) as gateway:
             deadline = time.monotonic() + 3
@@ -97,5 +99,6 @@ def test_h2_hardware_path_over_loopback_dds(tmp_path, monkeypatch):
                         assert_velocity(expected)
                 assert_velocity((0.0, 0.0, 0.0))
     finally:
+        control_server.stop(grace=0).wait()
         gateway_server.stop(grace=0).wait()
         engine.close()

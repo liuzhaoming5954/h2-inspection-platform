@@ -6,15 +6,18 @@ import argparse
 import json
 import logging
 import math
+import re
 import secrets
 import socket
 import threading
 import time
+from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Protocol
 from xml.etree import ElementTree
 
-from h2_gateway.teleop import ACTIONS, DIRECTIONS, LEASE_SECONDS, MAX_COMMAND_FUTURE_MS, TICK_SECONDS, teleop_reply
+from h2_gateway.teleop import ACTIONS, DIRECTIONS, LEASE_SECONDS, TICK_SECONDS, teleop_reply
 
 
 LOG = logging.getLogger(__name__)
@@ -27,16 +30,8 @@ STATE_MAX_AGE = 0.8
 DEFAULT_SENSOR_AGENT_URL = "http://192.168.124.162:8090/environment"
 MAX_VELOCITY_DURATION = 0.25
 MIN_VELOCITY_DURATION = 0.04
-# Cross-clock tolerance: the workstation and PC3 follow different time
-# sources (the robot runs chrony against robot-internal time) and may drift
-# or slew apart by hundreds of milliseconds. The backend already validates
-# command freshness against the browser on the same host, so this gateway
-# only rejects skews beyond this tolerance — never healthy commands.
-# Safety invariants that stay untouched: 250 ms max motion per frame, the
-# 2 s monotonic lease/dead-man, strictly increasing sequences, and the
-# clock-skew exemption for ordered stops.
-CLOCK_SKEW_TOLERANCE_MS = 2000
-GATEWAY_MAX_FUTURE_MS = MAX_COMMAND_FUTURE_MS + CLOCK_SKEW_TOLERANCE_MS
+MAX_HARDWARE_COMMAND_MS = 350
+ENVIRONMENT_SAMPLE_ID = re.compile(r"([0-9a-f]{32}):([1-9][0-9]{0,15})")
 
 # Initial supervised trial limits. The H2's built-in controller owns gait and balance.
 VELOCITIES = {
@@ -154,6 +149,8 @@ class AgentEnvironment:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reading: tuple[float, dict] | None = None  # (monotonic expiry, PC2 sample)
+        self._latest_samples: dict[str, int] = {}
+        self._current_instance: str | None = None
 
     def _http_fetch(self) -> dict | None:
         import urllib.request
@@ -165,32 +162,50 @@ class AgentEnvironment:
         sample = payload.get("sample") if isinstance(payload, dict) else None
         if not isinstance(sample, dict) or payload.get("available") is not True:
             return None
+        return sample
+
+    def _poll_once(self) -> None:
+        started = time.monotonic()
+        sample = self._fetch()
+        if not isinstance(sample, dict):
+            return
         reading = {}
-        for field in ("temperature_c", "humidity_percent", "captured_at"):
+        for field in ("temperature_c", "humidity_percent", "captured_at", "age_seconds"):
             value = sample.get(field)
             if type(value) not in (int, float):
-                return None
+                return
             try:
                 reading[field] = float(value)
             except OverflowError:
-                return None
+                return
             if not math.isfinite(reading[field]):
-                return None
-        return reading
-
-    def _poll_once(self) -> None:
-        reading = self._fetch()
-        if reading is None:
+                return
+        sample_id = sample.get("sample_id")
+        match = ENVIRONMENT_SAMPLE_ID.fullmatch(sample_id) if isinstance(sample_id, str) else None
+        if match is None or not 0 <= reading["age_seconds"] or reading["captured_at"] <= 0:
             return
-        captured_at = reading["captured_at"]
-        age = time.time() - captured_at
-        if not 0 <= age <= self._fresh_seconds:
+        instance, sequence_text = match.groups()
+        sequence = int(sequence_text)
+        if sequence > 2**53 - 1:
             return
-        expires_at = time.monotonic() + (self._fresh_seconds - age)
+        expires_at = started + self._fresh_seconds - reading.pop("age_seconds")
+        reading["sample_id"] = sample_id
         with self._lock:
-            # PC2 may return the same cached sample on consecutive polls.
-            if self._reading is None or captured_at != self._reading[1]["captured_at"]:
+            if instance != self._current_instance and instance in self._latest_samples:
+                return
+            latest = self._latest_samples.get(instance, 0)
+            if sequence < latest:
+                return
+            if sequence == latest:
+                if self._reading is not None and self._reading[1]["sample_id"] == sample_id:
+                    self._reading = (min(self._reading[0], expires_at), self._reading[1])
+                return
+            self._latest_samples[instance] = sequence
+            self._current_instance = instance
+            if expires_at > time.monotonic():
                 self._reading = (expires_at, reading)
+            else:
+                self._reading = None
 
     def _poll_loop(self) -> None:
         while not self._stop.wait(self._interval):
@@ -203,12 +218,50 @@ class AgentEnvironment:
     def sample(self) -> dict | None:
         with self._lock:
             reading = self._reading
-        if reading is None or time.monotonic() > reading[0]:
+        if reading is None:
             return None
-        return reading[1]
+        remaining_ms = math.floor((reading[0] - time.monotonic()) * 1000)
+        return {**reading[1], "remaining_ms": remaining_ms} if remaining_ms > 0 else None
 
     def close(self) -> None:
         self._stop.set()
+
+
+class _SDKLock:
+    """Serialize SDK access, serving older waiters first within a priority."""
+
+    SAFETY = 0
+    CONTROL = 1
+    STATUS = 2
+
+    def __init__(self):
+        self._changed = threading.Condition()
+        self._locked = False
+        self._issued = [0, 0, 0]
+        self._next = [0, 0, 0]
+
+    def _waiting(self, before: int) -> bool:
+        return self._issued[:before] != self._next[:before]
+
+    @contextmanager
+    def hold(self, priority: int, *, blocking: bool = True):
+        with self._changed:
+            acquire = blocking or (not self._locked and not self._waiting(priority + 1))
+            if acquire:
+                ticket = self._issued[priority]
+                self._issued[priority] += 1
+                self._changed.wait_for(lambda: not self._locked
+                                       and self._next[priority] == ticket
+                                       and not self._waiting(priority))
+                self._next[priority] += 1
+                self._locked = True
+        try:
+            yield acquire
+        finally:
+            if acquire:
+                with self._changed:
+                    self._locked = False
+                    self._changed.notify_all()
 
 
 class H2HardwareGateway:
@@ -219,7 +272,7 @@ class H2HardwareGateway:
         self._loco = loco
         self._environment = environment
         self._battery = battery
-        self._lock = threading.Lock()
+        self._lock = _SDKLock()
         self._shutdown = threading.Event()
         self._fsm: tuple[int, int | None] | None = None
         self._state_at = 0.0
@@ -275,20 +328,27 @@ class H2HardwareGateway:
     def _watch(self) -> None:
         next_poll = 0.0
         while not self._shutdown.wait(TICK_SECONDS):
-            with self._lock:
+            with self._lock.hold(_SDKLock.SAFETY):
                 if self._shutdown.is_set():
                     return
                 now = time.monotonic()
                 self._expire(now)
                 if now < next_poll:
                     continue
-                # Let stop and refreshed velocity take priority near the current
-                # motion deadline — but never let sustained motion frames starve
-                # the FSM poll: a stale state would revoke a healthy lease via
-                # _ready() and did so whenever frame gaps stayed under 250 ms.
-                if (self._motion_until and self._motion_until - now <= 2 * SDK_TIMEOUT
-                        and now - self._state_at < STATE_MAX_AGE / 2):
+                # Let ordinary polling yield to queued control. Once the
+                # state approaches its freshness limit, take a FIFO turn
+                # alongside directions so continued motion cannot starve it.
+                refresh_due = now - self._state_at >= STATE_MAX_AGE / 2
+                if (not refresh_due and self._motion_until
+                        and self._motion_until - now <= 2 * SDK_TIMEOUT):
                     continue
+            priority = _SDKLock.CONTROL if refresh_due else _SDKLock.STATUS
+            with self._lock.hold(priority, blocking=refresh_due) as acquired:
+                if not acquired:
+                    continue
+                if self._shutdown.is_set():
+                    return
+                self._expire(time.monotonic())
                 try:
                     self._fsm = self._loco.fsm()
                     self._state_at = time.monotonic()
@@ -301,8 +361,9 @@ class H2HardwareGateway:
                 self._expire(time.monotonic())
                 next_poll = time.monotonic() + STATE_POLL_INTERVAL
 
-    def get_state(self) -> dict:
-        with self._lock:
+    def get_state(self, *, include_telemetry: bool = True) -> dict:
+        priority = _SDKLock.STATUS if include_telemetry else _SDKLock.CONTROL
+        with self._lock.hold(priority):
             now = time.monotonic()
             self._expire(now)
             ready = self._ready(now)
@@ -325,21 +386,29 @@ class H2HardwareGateway:
                 state["fsm_id"] = fsm_id
                 if fsm_mode is not None:
                     state["fsm_mode"] = fsm_mode
-            if self._environment is not None:
-                reading = self._environment.sample()
-                if reading is not None:
-                    state["temperature_c"] = reading["temperature_c"]
-                    state["humidity_percent"] = reading["humidity_percent"]
-                    if "captured_at" in reading:
-                        state["environment_captured_at"] = reading["captured_at"]
-            if self._battery is not None:
-                percent = self._battery.battery()
-                if percent is not None:
-                    state["battery_percent"] = percent
+
+        if not include_telemetry:
             return state
+        # These caches use their own locks. Release the motion lock before
+        # reading them so a state request cannot hold up a stop or direction.
+        if self._environment is not None:
+            reading = self._environment.sample()
+            if reading is not None:
+                state["temperature_c"] = reading["temperature_c"]
+                state["humidity_percent"] = reading["humidity_percent"]
+                if "captured_at" in reading:
+                    state["environment_captured_at"] = reading["captured_at"]
+                if "remaining_ms" in reading and "sample_id" in reading:
+                    state["environment_remaining_ms"] = reading["remaining_ms"]
+                    state["environment_sample_id"] = reading["sample_id"]
+        if self._battery is not None:
+            percent = self._battery.battery()
+            if percent is not None:
+                state["battery_percent"] = percent
+        return state
 
     def teleop_acquire(self) -> dict:
-        with self._lock:
+        with self._lock.hold(_SDKLock.CONTROL):
             now = time.monotonic()
             self._expire(now)
             if self._stop_fault:
@@ -354,8 +423,10 @@ class H2HardwareGateway:
             self._lease_until = now + LEASE_SECONDS
             return teleop_reply(True, "acquired", "H2 teleop control acquired", self._token)
 
-    def teleop_command(self, token: str, sequence: int, action: str, expires_at_ms: int) -> dict:
-        with self._lock:
+    def teleop_command(self, token: str, sequence: int, action: str, gateway_deadline_ms: int | None,
+                       *, is_active: Callable[[], bool] | None = None) -> dict:
+        priority = _SDKLock.SAFETY if action == "stop" else _SDKLock.CONTROL
+        with self._lock.hold(priority):
             now = time.monotonic()
             self._expire(now)
             if self._stop_fault:
@@ -366,20 +437,19 @@ class H2HardwareGateway:
                 return teleop_reply(False, "invalid_action", "unsupported H2 teleop action")
             if sequence <= self._sequence:
                 return teleop_reply(False, "stale_sequence", "teleop sequence must strictly increase")
-            remaining_ms = expires_at_ms - time.time_ns() // 1_000_000
-            # Freshness was already validated by the backend against the
-            # browser on the same host. This cross-clock re-check only
-            # rejects skews beyond CLOCK_SKEW_TOLERANCE_MS (a wrong time
-            # domain), never healthy commands: an ordered stop stays fully
-            # exempt, stale movement still dies on the zero-duration clamp
-            # below, and only heartbeats need the explicit stale bound.
+            # A stop from the current lease remains valid even when delayed.
             if action != "stop":
-                if remaining_ms > GATEWAY_MAX_FUTURE_MS:
+                if is_active is not None and not is_active():
+                    return teleop_reply(False, "expired", "teleop request was cancelled before SDK admission")
+                if gateway_deadline_ms is None:
+                    return teleop_reply(False, "invalid_expiry", "PC3 monotonic deadline is required")
+                remaining_ms = gateway_deadline_ms - (time.monotonic_ns() + 999_999) // 1_000_000
+                if remaining_ms > MAX_HARDWARE_COMMAND_MS:
                     return teleop_reply(False, "invalid_expiry", "teleop deadline is too far in the future")
-                if action == "heartbeat" and remaining_ms <= -CLOCK_SKEW_TOLERANCE_MS:
+                if remaining_ms <= 0 or (action != "heartbeat" and remaining_ms < MIN_VELOCITY_DURATION * 1000):
                     return teleop_reply(False, "expired", "teleop command has expired")
             self._sequence = sequence
-            self._lease_until = now + LEASE_SECONDS
+            self._lease_until = time.monotonic() + LEASE_SECONDS
             if action == "heartbeat":
                 return teleop_reply(True, "renewed", "H2 teleop lease renewed", token)
             if action == "stop":
@@ -389,11 +459,9 @@ class H2HardwareGateway:
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
 
             duration = min(remaining_ms / 1000, MAX_VELOCITY_DURATION)
-            if duration < MIN_VELOCITY_DURATION:
-                return teleop_reply(False, "expired", "too little validity remains to send H2 motion")
             # Once sent, an RPC timeout cannot distinguish a lost response from lost delivery.
             self._stop_needed = True
-            self._motion_until = now + duration
+            self._motion_until = min(time.monotonic() + duration, gateway_deadline_ms / 1000)
             try:
                 self._loco.velocity(*VELOCITIES[action], duration)
             except Exception as error:
@@ -402,10 +470,8 @@ class H2HardwareGateway:
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
                 return teleop_reply(False, "sdk_rejected", "H2 velocity request was not acknowledged")
             if time.monotonic() >= self._motion_until:
-                # The SDK acknowledged after this frame's window; the watchdog
-                # may already have sent zero velocity mid-RPC, so re-assert the
-                # stop. The lease itself stays with the 2 s heartbeat deadline:
-                # a slow acknowledgement must not strand the operator.
+                # The SDK acknowledged after this frame's window. Send zero
+                # while this command still owns the lock and keep the lease.
                 if not self._stop():
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
                 return teleop_reply(True, "stopped", "H2 acknowledged a late frame; motion halted", token)
@@ -413,7 +479,7 @@ class H2HardwareGateway:
             return teleop_reply(True, "applied", "H2 acknowledged velocity request", token)
 
     def teleop_release(self, token: str) -> dict:
-        with self._lock:
+        with self._lock.hold(_SDKLock.SAFETY):
             if self._stop_fault:
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
             if not self._token or token != self._token:
@@ -424,7 +490,7 @@ class H2HardwareGateway:
 
     def close(self) -> None:
         self._shutdown.set()
-        with self._lock:
+        with self._lock.hold(_SDKLock.SAFETY):
             self._revoke()
         self._worker.join()
         if self._environment is not None:

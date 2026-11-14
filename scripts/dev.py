@@ -66,7 +66,13 @@ def main() -> None:
     gateway_mode.add_argument('--h2-interface', help='Use a local H2 SDK2 gateway on the named interface')
     gateway_mode.add_argument('--external-gateway', type=loopback_endpoint, metavar='LOOPBACK:PORT',
                               help='Use an external H2 gateway via a local SSH forward, without starting a gateway')
+    parser.add_argument('--external-teleop-gateway', type=loopback_endpoint, metavar='LOOPBACK:PORT',
+                        help='Dedicated local SSH forward for commands to the external H2 gateway')
     args = parser.parse_args()
+    if bool(args.external_gateway) != bool(args.external_teleop_gateway):
+        parser.error('--external-gateway and --external-teleop-gateway must be supplied together')
+    if args.external_gateway and args.external_gateway == args.external_teleop_gateway:
+        parser.error('state and teleoperation require separate local forwards')
     hardware_mode = args.h2_interface is not None or args.external_gateway is not None
     if hardware_mode and args.command != 'start':
         parser.error('--h2-interface and --external-gateway are only used with start')
@@ -97,6 +103,7 @@ def main() -> None:
     if hardware_mode:
         environment['H2_DATABASE_URL'] = f'sqlite:///{RUNTIME / "hardware.sqlite"}'
         environment['H2_GATEWAY_ADDRESS'] = args.external_gateway or '127.0.0.1:50051'
+        environment['H2_TELEOP_GATEWAY_ADDRESS'] = args.external_teleop_gateway or '127.0.0.1:50052'
         environment['H2_DATA_DIR'] = str(RUNTIME / 'hardware-data')
         if args.external_gateway:
             mode = 'H2 EXTERNAL GATEWAY'

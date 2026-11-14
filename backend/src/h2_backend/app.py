@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 
@@ -43,9 +44,17 @@ class ReviewInput(BaseModel):
 
 def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    teleop_gateway = None
     if gateway is None:
         from h2_gateway.client import GatewayClient
+        if settings.hardware_teleop:
+            control_address = settings.teleop_gateway_address
+            if not control_address or control_address == settings.gateway_address:
+                raise ValueError("H2 hardware mode requires a dedicated H2_TELEOP_GATEWAY_ADDRESS")
+            teleop_gateway = GatewayClient(target=control_address, timeout=0.75)
         gateway = GatewayClient(target=settings.gateway_address, timeout=3)
+    if teleop_gateway is None:
+        teleop_gateway = gateway
     service = InspectionService(settings, gateway)
 
     async def maintain() -> None:
@@ -60,16 +69,27 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await asyncio.to_thread(service.initialize)
-        worker = None if settings.hardware_teleop else asyncio.create_task(maintain())
+        # A slow status read must not use the workers reserved for commands.
+        executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="h2-teleop") if settings.hardware_teleop else None
+        app.state.teleop_executor = executor
+        worker = None
         try:
+            await asyncio.to_thread(service.initialize)
+            if not settings.hardware_teleop:
+                worker = asyncio.create_task(maintain())
             yield
         finally:
             if worker is not None:
                 worker.cancel()
                 with suppress(asyncio.CancelledError):
                     await worker
-            await asyncio.to_thread(service.close)
+            try:
+                await asyncio.to_thread(service.close)
+            finally:
+                if teleop_gateway is not gateway:
+                    teleop_gateway.close()
+                if executor is not None:
+                    await asyncio.to_thread(executor.shutdown)
 
     app = FastAPI(title="H2巡检技术验证 API", version="0.1.0", lifespan=lifespan,
                   description="Local validation API. Inspection readings and images are simulated. "
@@ -141,6 +161,7 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     @app.websocket("/api/teleop/ws")
     async def teleop_websocket(websocket: WebSocket):
-        await teleop_socket(websocket, service.gateway, hardware_teleop=settings.hardware_teleop)
+        await teleop_socket(websocket, teleop_gateway, hardware_teleop=settings.hardware_teleop,
+                            executor=getattr(app.state, "teleop_executor", None))
 
     return app

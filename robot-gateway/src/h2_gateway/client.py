@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ipaddress import ip_address
+import time
 from typing import Any
 
 import grpc
@@ -17,7 +18,11 @@ def command_dict(reply: pb.CommandReply) -> dict[str, Any]:
 
 
 def teleop_dict(reply: pb.TeleopReply) -> dict[str, Any]:
-    return {"accepted": reply.accepted, "code": reply.code, "message": reply.message, "token": reply.token}
+    result = {"accepted": reply.accepted, "code": reply.code, "message": reply.message, "token": reply.token}
+    if reply.HasField("gateway_monotonic_ms"):
+        result["gateway_monotonic_ms"] = reply.gateway_monotonic_ms
+        result["received_monotonic_ns"] = time.monotonic_ns()
+    return result
 
 
 class GatewayClient:
@@ -36,7 +41,12 @@ class GatewayClient:
         self.stub = rpc.RobotGatewayStub(self.channel)
 
     def get_state(self) -> dict[str, Any]:
+        started = time.monotonic_ns()
         state = self.stub.GetState(pb.Empty(), timeout=self.timeout)
+        transit_ms = (time.monotonic_ns() - started + 999_999) // 1_000_000
+        remaining = 0
+        if state.HasField("environment_remaining_ms") and state.HasField("environment_sample_id"):
+            remaining = max(0, state.environment_remaining_ms - transit_ms)
         return {"robot_id": state.robot_id, "status": state.status,
                 "task_id": state.task_id, "progress": state.progress,
                 "sequence": state.sequence,
@@ -49,16 +59,21 @@ class GatewayClient:
                 "teleop_ready": state.teleop_ready,
                 "fsm_id": state.fsm_id if state.HasField("fsm_id") else None,
                 "fsm_mode": state.fsm_mode if state.HasField("fsm_mode") else None,
-                "temperature_c": state.temperature_c if state.HasField("temperature_c") else None,
-                "humidity_percent": state.humidity_percent if state.HasField("humidity_percent") else None,
-                "environment_captured_at": state.environment_captured_at if state.HasField("environment_captured_at") else None}
+                "temperature_c": state.temperature_c if remaining and state.HasField("temperature_c") else None,
+                "humidity_percent": state.humidity_percent if remaining and state.HasField("humidity_percent") else None,
+                "environment_captured_at": state.environment_captured_at if remaining and state.HasField("environment_captured_at") else None,
+                "environment_remaining_ms": remaining or None,
+                "environment_sample_id": state.environment_sample_id if remaining else None}
 
     def teleop_acquire(self) -> dict[str, Any]:
         return teleop_dict(self.stub.TeleopAcquire(pb.Empty(), timeout=min(self.timeout, 0.75)))
 
-    def teleop_command(self, token: str, sequence: int, action: str, expires_at_ms: int) -> dict[str, Any]:
+    def teleop_command(self, token: str, sequence: int, action: str, expires_at_ms: int = 0, *,
+                       gateway_deadline_ms: int | None = None, timeout: float = 0.75) -> dict[str, Any]:
         request = pb.TeleopCommandRequest(token=token, sequence=sequence, action=action, expires_at_ms=expires_at_ms)
-        return teleop_dict(self.stub.TeleopCommand(request, timeout=min(self.timeout, 0.75)))
+        if gateway_deadline_ms is not None:
+            request.gateway_deadline_ms = gateway_deadline_ms
+        return teleop_dict(self.stub.TeleopCommand(request, timeout=min(self.timeout, timeout)))
 
     def teleop_release(self, token: str) -> dict[str, Any]:
         return teleop_dict(self.stub.TeleopRelease(pb.TeleopReleaseRequest(token=token), timeout=min(self.timeout, 0.75)))

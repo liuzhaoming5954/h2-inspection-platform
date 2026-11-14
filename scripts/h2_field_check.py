@@ -1,10 +1,8 @@
 #!/usr/bin/env python
 """Field self-check for the H2 teleop chain: acquire, heartbeat, release.
 
-Exercises the real path (browser-style WebSocket -> backend -> SSH forward ->
-PC3 gateway -> lease renewal) without sending any motion command. Run from
-the workstation after h2_field_start.sh; exit code 0 means the chain is
-ready for teleoperation, 1 means do not hand control to an operator.
+Checks hardware mode and readiness, then exercises the WebSocket and the PC3
+gateway's lease path without sending any motion command. Run on the workstation.
 
 Usage: .venv/bin/python scripts/h2_field_check.py
 """
@@ -15,66 +13,64 @@ import asyncio
 import json
 import sys
 import time
+from urllib.request import ProxyHandler, build_opener
 
 import websockets
 
+API_URL = "http://127.0.0.1:8000/api"
 WS_URL = "ws://127.0.0.1:8000/api/teleop/ws"
 ORIGIN = "http://127.0.0.1:5173"
 HEARTBEATS = 5
 HEARTBEAT_INTERVAL = 0.4
+REPLY_TIMEOUT = 2
+
+
+def hardware_is_ready() -> bool:
+    opener = build_opener(ProxyHandler({}))
+    with opener.open(f"{API_URL}/health", timeout=REPLY_TIMEOUT) as response:
+        health = json.load(response)
+    if health.get("hardware_teleop") is not True or health.get("gateway") != "connected":
+        return False
+    with opener.open(f"{API_URL}/robot", timeout=REPLY_TIMEOUT) as response:
+        state = json.load(response)
+    return (state.get("simulated") is False and state.get("teleop_ready") is True
+            and state.get("teleop_active") is False and state.get("status") == "ready")
 
 
 async def run_check() -> tuple[bool, list[str]]:
     log: list[str] = []
-    renewed = 0
     async with websockets.connect(WS_URL, additional_headers={"Origin": ORIGIN}) as ws:
-        sequence = 0
-        deadline = time.monotonic() + 2 + HEARTBEATS * HEARTBEAT_INTERVAL + 2
-        while time.monotonic() < deadline:
-            try:
-                message = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.3))
-            except asyncio.TimeoutError:
-                if renewed >= HEARTBEATS:
-                    break
-                continue
-            kind, code = message.get("type"), message.get("code")
-            if kind == "lease" and code == "acquired":
-                log.append("lease acquired")
-            elif kind == "ack" and code == "renewed":
-                renewed += 1
-                if renewed == 1:
-                    # First renewal starts the heartbeat cadence.
-                    pass
-            elif kind in ("error", "ack") and message.get("accepted") is False:
-                log.append(f"REJECTED {kind}/{code}: {message.get('message')}")
-                return False, log
-            elif kind == "lease" and message.get("accepted") is False:
-                log.append(f"DENIED {code}: {message.get('message')}")
-                return False, log
-            # Send the next heartbeat when due (single paced sender).
-            if renewed < HEARTBEATS and kind in ("lease", "ack"):
-                sequence += 1
-                await ws.send(json.dumps({
-                    "action": "heartbeat", "sequence": sequence,
-                    "sent_at_ms": int(time.time() * 1000),
-                }))
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
-        ok = renewed >= HEARTBEATS
-        if ok:
+        lease = json.loads(await asyncio.wait_for(ws.recv(), timeout=REPLY_TIMEOUT))
+        if lease.get("type") != "lease" or lease.get("accepted") is not True or lease.get("code") != "acquired":
+            return False, [f"lease: {lease.get('code')}"]
+        log.append("lease acquired")
+
+        async def acknowledge(action: str, sequence: int, expected: str) -> bool:
             await ws.send(json.dumps({
-                "action": "release", "sequence": sequence + 1,
-                "sent_at_ms": int(time.time() * 1000),
+                "action": action, "sequence": sequence,
+                "sent_at_ms": time.time_ns() // 1_000_000,
             }))
             try:
-                message = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
-                log.append(f"released: {message.get('code')}")
-            except (asyncio.TimeoutError, Exception):
-                log.append("release ack not observed (lease expires anyway)")
-        return ok, log
+                reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=REPLY_TIMEOUT))
+            except (TimeoutError, websockets.ConnectionClosed):
+                log.append(f"{action}: no acknowledgement")
+                return False
+            log.append(f"{action}: {reply.get('code')}")
+            return (reply.get("type") == "ack" and reply.get("accepted") is True
+                    and reply.get("code") == expected and reply.get("sequence") == sequence)
+
+        for sequence in range(1, HEARTBEATS + 1):
+            if not await acknowledge("heartbeat", sequence, "renewed"):
+                return False, log
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+        return await acknowledge("release", HEARTBEATS + 1, "released"), log
 
 
 def main() -> None:
     try:
+        if not hardware_is_ready():
+            print("FAIL: true hardware mode and an available, idle H2 are required.")
+            sys.exit(1)
         ok, log = asyncio.run(run_check())
     except Exception as error:
         print(f"FAIL: cannot reach the teleop chain: {type(error).__name__}: {error}")
@@ -82,10 +78,9 @@ def main() -> None:
     for line in log:
         print(f"  {line}")
     if ok:
-        print("SELF-CHECK PASSED: lease + heartbeat renewal work; teleop chain is ready.")
+        print("SELF-CHECK PASSED: hardware ready, lease acquired, heartbeats acknowledged, lease released.")
     else:
-        print("SELF-CHECK FAILED: heartbeats were not renewed. Check clock alignment "
-              "(host vs PC3) and the gateway log before touching the robot.")
+        print("SELF-CHECK FAILED: check the local API, SSH forward and PC3 gateway log.")
     sys.exit(0 if ok else 1)
 
 

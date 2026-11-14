@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # One-command field startup for H2 hardware teleoperation.
 #
-# Brings up, in order: robot-PC clock sync (host as reference), the PC2
-# RS-485 sensor agent, the PC3 gRPC gateway, the SSH local forward
-# (127.0.0.1:15051 -> PC3 127.0.0.1:50051), and the workstation stack in
-# external-gateway mode. Components already running are skipped.
+# Brings up, in order: the PC2 RS-485 sensor agent, the PC3 gRPC gateway,
+# the independent SSH local forwards for status (15051 -> 50051) and
+# teleoperation (15052 -> 50052), then the workstation stack. The forwarded
+# ports are bound to loopback on both sides. Running components are reused.
 #
 # SSH password is read from H2_FIELD_PASSWORD, or prompted once when run
 # from a terminal. Never store robot passwords in this repository.
+# Before upgrading, deploy the new PC2 script to ~/sensor_agent.py and stop
+# the old PC2 and PC3 processes. See robot-gateway/H2_COMMISSIONING.md.
 #
 # Usage: scripts/h2_field_start.sh   then open http://127.0.0.1:5173
 set -u
@@ -22,45 +24,6 @@ PASS="${H2_FIELD_PASSWORD:-}"
 if [ -z "$PASS" ]; then
   if [ -t 0 ]; then read -rsp "SSH password for robot PCs: " PASS; echo
   else echo "set H2_FIELD_PASSWORD (or run from a terminal)"; exit 1; fi
-fi
-
-echo "== 0/4 clock: join the robot time domain (host follows PC3) =="
-# PC2/PC3 run chrony against the robot-internal time source; manual sets on
-# them are reverted within minutes. The host must therefore follow the robot
-# clock. Measurement uses a shared SSH connection (ControlMaster) so the
-# date query RTT is ~1 ms instead of the ~200 ms connect bias, and the host
-# is placed 100 ms behind PC3: the centre of the command validity window.
-CM_DIR="$LOG_DIR/ssh-cm"; mkdir -p "$CM_DIR"
-SSH_CM=(-o ControlMaster=auto -o ControlPath="$CM_DIR/%r@%h-%p" -o ControlPersist=60)
-sshpass -p "$PASS" ssh -o ConnectTimeout=5 "${SSH_CM[@]}" unitree@"$PC3" true \
-  </dev/null >>"$LOG_DIR/h2-start.log" 2>&1
-
-SYNC_RAW=$(sshpass -p "$PASS" ssh "${SSH_CM[@]}" unitree@"$PC3" \
-  'chronyc tracking 2>/dev/null | grep "System time"' 2>/dev/null)
-if [ -n "$SYNC_RAW" ]; then
-  echo "   PC3 chrony: $SYNC_RAW"
-  for _ in 1 2 3 4 5 6; do
-    SYNC_VAL=$(echo "$SYNC_RAW" | grep -oE '[0-9]+\.[0-9]+ ' | head -1)
-    OK=$(echo "$SYNC_VAL < 0.1" | bc 2>/dev/null)
-    [ "$OK" = "1" ] && break
-    echo "   time source still converging ($SYNC_VAL s), waiting 20s…"
-    sleep 20
-    SYNC_RAW=$(sshpass -p "$PASS" ssh "${SSH_CM[@]}" unitree@"$PC3" \
-      'chronyc tracking 2>/dev/null | grep "System time"' 2>/dev/null)
-  done
-fi
-
-T0=$(date +%s.%N)
-P3=$(sshpass -p "$PASS" ssh "${SSH_CM[@]}" unitree@"$PC3" 'date +%s.%N' 2>/dev/null)
-T1=$(date +%s.%N)
-if [ -n "$P3" ]; then
-  MID=$(echo "($T0+$T1)/2" | bc -l)
-  NEW=$(echo "$T1 + ($P3 - $MID) - 0.1" | bc -l)
-  echo "$PASS" | sudo -S timedatectl set-ntp false >/dev/null 2>&1
-  echo "$PASS" | sudo -S date -s @"$NEW" >/dev/null 2>&1 \
-    && echo "   host aligned 100ms behind PC3 (window centre)"
-else
-  echo "   WARN: PC3 unreachable, clock not aligned"
 fi
 
 echo "== 1/4 PC2 sensor agent =="
@@ -91,38 +54,74 @@ if sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
   echo "   already running"
 else
   sshpass -p "$PASS" ssh unitree@"$PC3" \
-    'cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 > gateway.log 2>&1 < /dev/null &' \
+    'cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &' \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
     && echo "   started" || echo "   FAILED (PC3 offline?)"
   sleep 3
 fi
 
-echo "== 3/4 SSH forward 127.0.0.1:15051 -> PC3:50051 =="
-if ss -tln | grep -q '127.0.0.1:15051'; then
-  echo "   already listening"
-else
-  sshpass -p "$PASS" ssh -N -T -f -o ExitOnForwardFailure=yes \
-    -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
-    -L 127.0.0.1:15051:127.0.0.1:50051 unitree@"$PC3" \
-    && echo "   forward up" || echo "   FAILED"
-fi
+echo "== 3/4 SSH forwards (status and teleoperation) =="
+previous_forward_pid=
+for mapping in 15051:50051 15052:50052; do
+  local_port=${mapping%:*}
+  pc3_port=${mapping#*:}
+  forward="127.0.0.1:$local_port:127.0.0.1:$pc3_port"
+  listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
+  if [ -z "$listener" ]; then
+    sshpass -p "$PASS" ssh -N -T -f -S none \
+      -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+      -L "$forward" unitree@"$PC3" || exit 1
+    listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
+  fi
+  if [[ $listener =~ pid=([0-9]+), ]]; then
+    forward_pid=${BASH_REMATCH[1]}
+    forward_args=$(tr '\0' ' ' < "/proc/$forward_pid/cmdline") || exit 1
+    if [[ $(readlink "/proc/$forward_pid/exe") == */ssh && $forward_args == *" -S none "* \
+        && $forward_args == *" -L $forward "* && $forward_args == *" unitree@$PC3 "* \
+        && $forward_pid != "$previous_forward_pid" ]]; then
+      previous_forward_pid=$forward_pid
+      echo "   $mapping forward up"
+      continue
+    fi
+  fi
+  echo "NOT READY: port $local_port must use its own SSH process for $mapping. Check the existing listener."
+  exit 1
+done
 
 echo "== 4/4 workstation stack (external gateway) =="
-.venv/bin/python scripts/dev.py stop >/dev/null 2>&1
+.venv/bin/python scripts/dev.py stop >>"$LOG_DIR/dev-supervisor.log" 2>&1 || exit 1
+for _ in $(seq 1 20); do
+  [ "$(.venv/bin/python scripts/dev.py status)" = stopped ] && break
+  sleep 1
+done
+if [ "$(.venv/bin/python scripts/dev.py status)" != stopped ]; then
+  echo "NOT READY: old workstation stack is still running. Check .runtime/logs/dev-supervisor.log."
+  exit 1
+fi
 nohup .venv/bin/python scripts/dev.py start --external-gateway 127.0.0.1:15051 \
+  --external-teleop-gateway 127.0.0.1:15052 \
   >>"$LOG_DIR/dev-supervisor.log" 2>&1 &
 echo "   starting (log: .runtime/logs/dev-supervisor.log)"
 for _ in $(seq 1 20); do
   sleep 1
-  curl -s --max-time 2 http://127.0.0.1:8000/api/health >/dev/null 2>&1 && break
+  if curl --fail -s --max-time 2 http://127.0.0.1:8000/api/health >/dev/null 2>&1 \
+      && curl --fail -s --max-time 2 http://127.0.0.1:5173/ >/dev/null 2>&1; then
+    break
+  fi
 done
 echo "== health =="
-curl -s --max-time 3 http://127.0.0.1:8000/api/health || echo "(backend not ready yet)"
+if ! curl --fail -s --max-time 3 http://127.0.0.1:8000/api/health \
+    || ! curl --fail -s --max-time 3 http://127.0.0.1:5173/ >/dev/null; then
+  echo "NOT READY: check the workstation service logs."
+  exit 1
+fi
 echo
 
-echo "== self-check: teleop lease + heartbeat (no motion) =="
+echo "== self-check: teleop lease, heartbeat, release (no motion) =="
 if .venv/bin/python scripts/h2_field_check.py; then
   echo "READY: open http://127.0.0.1:5173 and start teleoperation."
 else
   echo "NOT READY: fix the issues above before touching the robot."
+  exit 1
 fi

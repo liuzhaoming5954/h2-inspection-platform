@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from ipaddress import ip_address
 
@@ -25,11 +26,22 @@ from h2_gateway.hardware import (
 
 
 class GatewayService(rpc.RobotGatewayServicer):
-    def __init__(self, engine: SimulatorEngine | H2HardwareGateway):
+    def __init__(self, engine: SimulatorEngine | H2HardwareGateway, lane: str = "both"):
         self.engine = engine
+        self.lane = lane
+
+    def _require_teleop(self, context: grpc.ServicerContext) -> None:
+        if self.lane == "state":
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "Use the dedicated H2 teleoperation endpoint")
+
+    def _teleop_reply(self, result: dict) -> pb.TeleopReply:
+        if result["accepted"] and isinstance(self.engine, H2HardwareGateway):
+            return pb.TeleopReply(**result, gateway_monotonic_ms=time.monotonic_ns() // 1_000_000)
+        return pb.TeleopReply(**result)
 
     def GetState(self, request: pb.Empty, context: grpc.ServicerContext) -> pb.RobotState:
-        state = self.engine.get_state()
+        state = (self.engine.get_state(include_telemetry=False) if self.lane == "teleop"
+                 and isinstance(self.engine, H2HardwareGateway) else self.engine.get_state())
         if "pose" in state:
             state["pose"] = pb.Pose(**state["pose"])
         return pb.RobotState(**state)
@@ -55,27 +67,34 @@ class GatewayService(rpc.RobotGatewayServicer):
         return pb.TaskResult(**result)
 
     def TeleopAcquire(self, request: pb.Empty, context: grpc.ServicerContext) -> pb.TeleopReply:
+        self._require_teleop(context)
         if not context.is_active():
             context.abort(grpc.StatusCode.CANCELLED, "teleop request no longer active")
         result = self.engine.teleop_acquire()
         if result["accepted"] and not context.is_active():
             self.engine.teleop_release(result["token"])
             context.abort(grpc.StatusCode.CANCELLED, "teleop request no longer active")
-        return pb.TeleopReply(**result)
+        return self._teleop_reply(result)
 
     def TeleopCommand(self, request: pb.TeleopCommandRequest, context: grpc.ServicerContext) -> pb.TeleopReply:
+        self._require_teleop(context)
         if request.action != "stop" and not context.is_active():
             context.abort(grpc.StatusCode.CANCELLED, "teleop request no longer active")
-        return pb.TeleopReply(**self.engine.teleop_command(
-            request.token, request.sequence, request.action, request.expires_at_ms,
-        ))
+        if isinstance(self.engine, H2HardwareGateway):
+            deadline = request.gateway_deadline_ms if request.HasField("gateway_deadline_ms") else None
+            result = self.engine.teleop_command(request.token, request.sequence, request.action, deadline,
+                                               is_active=context.is_active)
+        else:
+            result = self.engine.teleop_command(request.token, request.sequence, request.action, request.expires_at_ms)
+        return self._teleop_reply(result)
 
     def TeleopRelease(self, request: pb.TeleopReleaseRequest, context: grpc.ServicerContext) -> pb.TeleopReply:
-        return pb.TeleopReply(**self.engine.teleop_release(request.token))
+        self._require_teleop(context)
+        return self._teleop_reply(self.engine.teleop_release(request.token))
 
 
 def create_server(engine: SimulatorEngine | H2HardwareGateway, host: str = "127.0.0.1",
-                  port: int = 50051) -> tuple[grpc.Server, int]:
+                  port: int = 50051, *, lane: str = "both") -> tuple[grpc.Server, int]:
     address = host
     if isinstance(engine, H2HardwareGateway):
         try:
@@ -91,7 +110,7 @@ def create_server(engine: SimulatorEngine | H2HardwareGateway, host: str = "127.
         ("grpc.max_send_message_length", 32 * 1024 * 1024),
         ("grpc.max_receive_message_length", 4 * 1024 * 1024),
     ])
-    rpc.add_RobotGatewayServicer_to_server(GatewayService(engine), server)
+    rpc.add_RobotGatewayServicer_to_server(GatewayService(engine, lane), server)
     bound_port = server.add_insecure_port(f"{address}:{port}")
     if not bound_port:
         raise RuntimeError(f"Could not bind gRPC gateway to {host}:{port}")
@@ -102,6 +121,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="H2 simulator or high-level SDK2 teleoperation gateway")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument("--teleop-port", type=int, default=50052, help="Separate loopback port for H2 control")
     parser.add_argument("--db", default=os.environ.get("H2_GATEWAY_DB", ".local/state/gateway.sqlite3"))
     parser.add_argument("--step-delay", type=float, default=0.8, help="Simulated seconds per point")
     parser.add_argument("--h2-interface", help="Explicitly enable H2 hardware via the named SDK2 DDS interface")
@@ -110,6 +130,8 @@ def main() -> None:
         try:
             if not ip_address(args.host).is_loopback:
                 parser.error("H2 hardware gateway requires a loopback IP address")
+            if args.port == args.teleop_port or not 1 <= args.teleop_port <= 65535:
+                parser.error("H2 teleoperation requires a separate, valid --teleop-port")
             loco = UnitreeLoco(args.h2_interface)
             battery = None
             try:
@@ -134,18 +156,25 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+    servers = []
     try:
-        server, port = create_server(engine, args.host, args.port)
+        server, port = create_server(engine, args.host, args.port, lane="state" if args.h2_interface else "both")
+        servers.append(server)
         server.start()
+        targets = {}
+        if args.h2_interface:
+            control, control_port = create_server(engine, args.host, args.teleop_port, lane="teleop")
+            servers.append(control)
+            control.start()
+            targets = {"interface": args.h2_interface, "teleop_target": f"{args.host}:{control_port}"}
         print(json.dumps({"service": "h2-gateway", "simulated": not args.h2_interface,
                           "target": f"{args.host}:{port}",
-                          **({"interface": args.h2_interface} if args.h2_interface else {"db": args.db})}),
+                          **(targets if args.h2_interface else {"db": args.db})}),
               flush=True)
-        try:
-            stop.wait()
-        finally:
-            server.stop(grace=0).wait(timeout=3)
+        stop.wait()
     finally:
+        for running in reversed(servers):
+            running.stop(grace=0).wait(timeout=3)
         engine.close()
 
 

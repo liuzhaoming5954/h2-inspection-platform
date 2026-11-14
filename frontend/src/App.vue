@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
@@ -52,6 +52,9 @@ const teleopLocked = computed(() => teleopSession.value || remoteTeleop.value)
 const teleopDisabledReason = computed(() => {
   if (hardwareMode.value) {
     if (hardwareConfigured.value !== true || robot.value?.simulated === true) return '等待真机遥控模式确认'
+    // The control gateway checks live readiness for the lease and each request.
+    // A delayed status poll must not stop an otherwise healthy control session.
+    if (teleopSession.value) return ''
     if (!connected.value || !robot.value) return '等待服务和机器人连接'
     if (robot.value.status === 'fault') return '真机遥控故障，请检查网关和机器人'
     return robot.value.teleop_ready === true ? '' : '等待机器人进入可遥控的高层运动状态'
@@ -71,26 +74,12 @@ const hardwareState = computed(() => robotAvailable.value && robot.value?.simula
   ? hardwareStateNames[robot.value.status] ?? '状态未知'
   : '未连接')
 const environmentFreshnessMs = 8000
-const environmentCapturedAt = computed(() => {
-  const state = robot.value
-  if (!hardwareMode.value || !connected.value || !state || state.status === 'offline'
-    || !Number.isFinite(state.temperature_c) || !Number.isFinite(state.humidity_percent)) return null
-  const capturedAt = state.environment_captured_at
-  return typeof capturedAt === 'number' && Number.isFinite(capturedAt) && capturedAt > 0 ? capturedAt : null
-})
-const freshEnvironmentCapturedAt = ref<number | null>(null)
-watch(environmentCapturedAt, (capturedAt, _, onCleanup) => {
-  freshEnvironmentCapturedAt.value = null
-  if (capturedAt === null) return
-  // Use the PC2 capture time so polling never extends the sample's lifetime.
-  const ageMs = Date.now() - capturedAt * 1000
-  if (ageMs < 0 || ageMs >= environmentFreshnessMs) return
-  freshEnvironmentCapturedAt.value = capturedAt
-  const timer = setTimeout(() => { freshEnvironmentCapturedAt.value = null }, Math.ceil(environmentFreshnessMs - ageMs))
-  onCleanup(() => clearTimeout(timer))
-})
-const hardwareEnvironment = computed(() => freshEnvironmentCapturedAt.value !== null
-  && environmentCapturedAt.value === freshEnvironmentCapturedAt.value ? robot.value : null)
+const environmentWatermarks = new Map<string, { sequence: number; expiresAt: number }>()
+const freshEnvironment = ref<Pick<RobotState, 'temperature_c' | 'humidity_percent'> | null>(null)
+let environmentInstance: string | undefined
+let environmentTimer: ReturnType<typeof setTimeout> | undefined
+const hardwareEnvironment = computed(() => connected.value && robot.value?.simulated === false
+  && robot.value.status !== 'offline' ? freshEnvironment.value : null)
 const environmentTemperature = computed(() => hardwareMode.value ? hardwareEnvironment.value?.temperature_c ?? null : latestSample.value?.temperature_c ?? null)
 const environmentHumidity = computed(() => hardwareMode.value ? hardwareEnvironment.value?.humidity_percent ?? null : latestSample.value?.humidity_percent ?? null)
 const environmentNote = computed(() => hardwareMode.value
@@ -103,6 +92,39 @@ function displayTime(value?: string) {
   if (!value) return '—'
   const date = new Date(value)
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function updateHardwareEnvironment(state: RobotState, requestStartedAt: number) {
+  clearTimeout(environmentTimer)
+  const sampleId = typeof state.environment_sample_id === 'string'
+    ? /^([0-9a-f]{32}):([1-9][0-9]{0,15})$/.exec(state.environment_sample_id) : null
+  const remaining = state.environment_remaining_ms
+  if (state.simulated !== false || state.status === 'offline' || !sampleId || typeof remaining !== 'number'
+      || !Number.isSafeInteger(remaining) || remaining < 0 || remaining > environmentFreshnessMs
+      || !Number.isFinite(state.temperature_c) || !Number.isFinite(state.humidity_percent)) {
+    freshEnvironment.value = null
+    return
+  }
+  const instance = sampleId[1]!
+  const sequence = Number(sampleId[2])
+  const previous = environmentWatermarks.get(instance)
+  if (!Number.isSafeInteger(sequence) || (previous && (instance !== environmentInstance || sequence < previous.sequence))) {
+    freshEnvironment.value = null
+    return
+  }
+  // Start at request time to conservatively count the whole HTTP round trip.
+  // A repeated sample may shorten its deadline but can never reset it.
+  const expiresAt = previous?.sequence === sequence
+    ? Math.min(previous.expiresAt, requestStartedAt + remaining) : requestStartedAt + remaining
+  environmentWatermarks.set(instance, { sequence, expiresAt })
+  environmentInstance = instance
+  const timeLeft = expiresAt - performance.now()
+  if (timeLeft <= 0) {
+    freshEnvironment.value = null
+    return
+  }
+  freshEnvironment.value = { temperature_c: state.temperature_c, humidity_percent: state.humidity_percent }
+  environmentTimer = setTimeout(() => { freshEnvironment.value = null }, Math.ceil(timeLeft))
 }
 
 async function sync() {
@@ -142,12 +164,15 @@ async function pollRobot() {
   const controller = new AbortController()
   robotRequest = controller
   try {
+    const requestedAt = performance.now()
     const raw = await request<RobotState & { state?: RobotState }>('/api/robot', {
+      cache: 'no-store',
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(1600)]),
     })
     if (disposed) return
     robot.value = raw.state ?? raw
     robotAvailable.value = robot.value.connected !== false && robot.value.connection_status !== 'offline'
+    updateHardwareEnvironment(robot.value, requestedAt)
     robotError.value = robotAvailable.value ? '' : '机器人未连接。'
     lastSync.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (error) {
@@ -251,6 +276,7 @@ onBeforeUnmount(() => {
   disposed = true
   clearTimeout(pollTimer)
   clearTimeout(robotPollTimer)
+  clearTimeout(environmentTimer)
   clearInterval(clockTimer)
   robotRequest?.abort()
 })

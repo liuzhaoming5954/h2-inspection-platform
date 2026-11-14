@@ -1,73 +1,46 @@
-"""Cross-clock tolerance semantics: healthy commands survive skew, stale motion dies."""
+"""Hardware command deadlines use PC3 monotonic time and fail closed."""
 
 import time
 
-from h2_gateway.hardware import CLOCK_SKEW_TOLERANCE_MS, GATEWAY_MAX_FUTURE_MS, H2HardwareGateway
+import pytest
 
+from h2_gateway.hardware import H2HardwareGateway, MAX_HARDWARE_COMMAND_MS
 from test_hardware import RecordingLoco, wait_for
 
 
-def now_ms() -> int:
-    return time.time_ns() // 1_000_000
+def now_ms():
+    return time.monotonic_ns() // 1_000_000
 
 
-def make_ready_gateway():
-    gateway = H2HardwareGateway(RecordingLoco())
+@pytest.fixture
+def ready_gateway():
+    loco = RecordingLoco()
+    gateway = H2HardwareGateway(loco)
     try:
         wait_for(gateway, lambda state: state["teleop_ready"])
-        reply = gateway.teleop_acquire()
-        assert reply["accepted"], reply
-        return gateway, reply["token"]
-    except Exception:
-        gateway.close()
-        raise
-
-
-def test_heartbeat_survives_healthy_skew_both_directions():
-    gateway, token = make_ready_gateway()
-    try:
-        # Host behind PC3 by most of the tolerance (stale per the old check).
-        past = now_ms() - int(CLOCK_SKEW_TOLERANCE_MS * 0.95)
-        reply = gateway.teleop_command(token, 1, "heartbeat", past)
-        assert reply["accepted"] and reply["code"] == "renewed", reply
-
-        # Host ahead of PC3 by well beyond the old 500 ms future cap.
-        future = now_ms() + int(GATEWAY_MAX_FUTURE_MS * 0.95)
-        reply = gateway.teleop_command(token, 2, "heartbeat", future)
-        assert reply["accepted"] and reply["code"] == "renewed", reply
+        yield gateway, loco, gateway.teleop_acquire()["token"]
     finally:
         gateway.close()
 
 
-def test_heartbeat_rejected_beyond_tolerance():
-    gateway, token = make_ready_gateway()
-    try:
-        too_far_future = now_ms() + GATEWAY_MAX_FUTURE_MS + 500
-        reply = gateway.teleop_command(token, 1, "heartbeat", too_far_future)
-        assert not reply["accepted"] and reply["code"] == "invalid_expiry", reply
-
-        too_stale = now_ms() - CLOCK_SKEW_TOLERANCE_MS - 500
-        reply = gateway.teleop_command(token, 2, "heartbeat", too_stale)
-        assert not reply["accepted"] and reply["code"] == "expired", reply
-    finally:
-        gateway.close()
+@pytest.mark.parametrize("jump", [-52_000_000_000, 52_000_000_000])
+def test_wall_clock_jump_does_not_affect_hardware_commands(ready_gateway, monkeypatch, jump):
+    gateway, loco, token = ready_gateway
+    wall_time = time.time_ns()
+    monkeypatch.setattr(time, "time_ns", lambda: wall_time + jump)
+    assert gateway.teleop_command(token, 1, "heartbeat", now_ms() + 300)["code"] == "renewed"
+    assert gateway.teleop_command(token, 2, "forward", now_ms() + 300)["code"] == "applied"
+    assert loco.commands.get_nowait()[0] == (0.15, 0.0, 0.0)
+    assert gateway.teleop_command(token, 3, "stop", None)["code"] == "stopped"
+    assert loco.commands.get_nowait()[0] == (0.0, 0.0, 0.0)
 
 
-def test_stale_movement_command_is_still_rejected():
-    gateway, token = make_ready_gateway()
-    try:
-        stale = now_ms() - 1500  # inside heartbeat tolerance, but motion must die
-        reply = gateway.teleop_command(token, 1, "forward", stale)
-        assert not reply["accepted"] and reply["code"] == "expired", reply
-    finally:
-        gateway.close()
-
-
-def test_stop_keeps_full_clock_skew_exemption():
-    gateway, token = make_ready_gateway()
-    try:
-        huge_skew = now_ms() - 60_000
-        reply = gateway.teleop_command(token, 1, "stop", huge_skew)
-        assert reply["accepted"] and reply["code"] == "stopped", reply
-    finally:
-        gateway.close()
+@pytest.mark.parametrize("action", ["forward", "heartbeat"])
+def test_invalid_deadlines_do_not_renew_lease(ready_gateway, action):
+    gateway, loco, token = ready_gateway
+    lease_until = gateway._lease_until
+    for deadline, expected in [(None, "invalid_expiry"), (now_ms() - 1, "expired"),
+                               (now_ms() + MAX_HARDWARE_COMMAND_MS + 100, "invalid_expiry")]:
+        assert gateway.teleop_command(token, 1, action, deadline)["code"] == expected
+    assert gateway._lease_until == lease_until
+    assert loco.commands.empty()

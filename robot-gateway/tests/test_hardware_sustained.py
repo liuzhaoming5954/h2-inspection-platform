@@ -32,7 +32,7 @@ def test_sustained_frames_keep_the_lease_alive():
         while time.monotonic() < deadline:
             seq += 1
             reply = gateway.teleop_command(token, seq, "forward",
-                                           time.time_ns() // 1_000_000 + 350)
+                                           time.monotonic_ns() // 1_000_000 + 350)
             assert reply["accepted"], reply
             time.sleep(0.2)
         assert gateway.get_state()["teleop_active"] is True
@@ -50,14 +50,14 @@ def test_late_sdk_acknowledgement_halts_motion_but_keeps_the_lease():
         # remaining ≈ 350 ms -> duration 250 ms; the RPC sleeps 300 ms, so the
         # acknowledgement arrives after the frame's own deadline.
         reply = gateway.teleop_command(token, 1, "forward",
-                                       time.time_ns() // 1_000_000 + 350)
+                                       time.monotonic_ns() // 1_000_000 + 350)
         assert reply["accepted"] and reply["code"] == "stopped", reply
         # The late frame executed, then an ordered zero velocity follows it…
         assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
         assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
         # …and the lease survives: the next command goes straight through.
         reply = gateway.teleop_command(token, 2, "heartbeat",
-                                       time.time_ns() // 1_000_000 + 350)
+                                       time.monotonic_ns() // 1_000_000 + 350)
         assert reply["accepted"] and reply["code"] == "renewed", reply
         assert gateway.get_state()["teleop_active"] is True
     finally:

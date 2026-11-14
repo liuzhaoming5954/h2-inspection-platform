@@ -15,6 +15,7 @@ import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from uuid import uuid4
 
 import serial
 
@@ -69,12 +70,18 @@ class Latest:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.sample: dict | None = None
+        self.captured_monotonic = 0.0
+        self.instance_id = uuid4().hex
+        self.sequence = 0
         self.failures = 0
 
     def update(self, temp: float, humi: float) -> None:
         with self.lock:
+            self.sequence += 1
+            self.captured_monotonic = time.monotonic()
             self.sample = {"temperature_c": round(temp, 1), "humidity_percent": round(humi, 1),
-                           "captured_at": time.time(), "source": "pc2-rs485", "ok": True}
+                           "captured_at": time.time(), "sample_id": f"{self.instance_id}:{self.sequence}",
+                           "source": "pc2-rs485", "ok": True}
             self.failures = 0
 
     def note_failure(self) -> None:
@@ -83,11 +90,9 @@ class Latest:
 
     def snapshot(self) -> dict:
         with self.lock:
-            sample = dict(self.sample) if self.sample else None
-            failures = self.failures
-        if sample and time.time() - sample["captured_at"] > FRESH_SECONDS:
-            sample = None
-        return {"available": sample is not None, "sample": sample, "consecutive_failures": failures}
+            age = time.monotonic() - self.captured_monotonic
+            sample = {**self.sample, "age_seconds": age} if self.sample is not None and age < FRESH_SECONDS else None
+            return {"available": sample is not None, "sample": sample, "consecutive_failures": self.failures}
 
 
 LATEST = Latest()
@@ -118,6 +123,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(LATEST.snapshot()).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

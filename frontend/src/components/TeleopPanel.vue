@@ -59,7 +59,7 @@ const note = computed(() => feedback.value || props.disabledReason || (active.va
 // backend -> SSH forward -> PC3 -> DDS and back, 150-300 ms in the field)
 // starve the motion window and stall the robot. Keep a fixed 100 ms cadence
 // with a small outstanding cap instead; sequences stay strictly increasing.
-// Stop and release still go through send() directly and are never queued.
+// The hardware backend keeps one waiting frame and lets stop supersede motion.
 const MOVEMENT_INTERVAL_MS = 100
 const HEARTBEAT_INTERVAL_MS = 400
 const ACK_TIMEOUT_MS = 500
@@ -148,6 +148,8 @@ function tick() {
   }
   const movement = canMove.value ? direction.value : null
   if (movement) {
+    // After a quick re-press, send only once stop is acknowledged and the input is still held.
+    if (props.hardware && inflight.some(frame => frame.action === 'stop')) return
     if (inflight.length < MAX_INFLIGHT_MOVEMENT && now - lastSentAt >= MOVEMENT_INTERVAL_MS) send(movement)
   } else if (inflight.length === 0 && now - lastSentAt >= HEARTBEAT_INTERVAL_MS) {
     send('heartbeat')

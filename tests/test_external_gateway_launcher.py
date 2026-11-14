@@ -74,13 +74,16 @@ def test_external_gateway_launches_only_local_api_and_frontend(launcher, monkeyp
     monkeypatch.setenv("H2_DATABASE_URL", "postgresql://example.invalid/inspection")
     monkeypatch.setenv("H2_DATA_DIR", "/inspection-data")
 
-    services, database_commands = start(launcher, monkeypatch, "--external-gateway", endpoint)
+    teleop_endpoint = endpoint.rsplit(":", 1)[0] + ":15052"
+    services, database_commands = start(launcher, monkeypatch, "--external-gateway", endpoint,
+                                        "--external-teleop-gateway", teleop_endpoint)
 
     assert list(services) == ["api", "frontend"]
     assert database_commands == []
     for _, command, environment in services.values():
         assert command[command.index("--host") + 1] == "127.0.0.1"
         assert environment["H2_GATEWAY_ADDRESS"] == endpoint
+        assert environment["H2_TELEOP_GATEWAY_ADDRESS"] == teleop_endpoint
         assert environment["H2_HARDWARE_TELEOP"] == "1"
         assert environment["H2_DATABASE_URL"] == f"sqlite:///{launcher.RUNTIME / 'hardware.sqlite'}"
         assert environment["H2_DATA_DIR"] == str(launcher.RUNTIME / "hardware-data")
@@ -94,6 +97,9 @@ def test_external_gateway_launches_only_local_api_and_frontend(launcher, monkeyp
     ["start", "--external-gateway", "127.0.0.1"],
     ["start", "--external-gateway", "127.0.0.1:0"],
     ["start", "--external-gateway", "127.0.0.1:65536"],
+    ["start", "--external-gateway", "127.0.0.1:15051"],
+    ["start", "--external-teleop-gateway", "127.0.0.1:15052"],
+    ["start", "--external-gateway", "127.0.0.1:15051", "--external-teleop-gateway", "127.0.0.1:15051"],
     ["start", "--external-gateway", "127.0.0.1:15051", "--h2-interface", "eth0"],
     ["status", "--external-gateway", "127.0.0.1:15051"],
     ["stop", "--external-gateway", "127.0.0.1:15051"],
@@ -127,5 +133,6 @@ def test_local_hardware_still_launches_gateway_with_sdk_interface(launcher, monk
     assert set(services) == {"gateway", "api", "frontend"}
     assert services["gateway"][1][-2:] == ["--h2-interface", "eth0"]
     assert services["api"][2]["H2_GATEWAY_ADDRESS"] == "127.0.0.1:50051"
+    assert services["api"][2]["H2_TELEOP_GATEWAY_ADDRESS"] == "127.0.0.1:50052"
     assert services["api"][2]["H2_HARDWARE_TELEOP"] == "1"
     assert database_commands == []

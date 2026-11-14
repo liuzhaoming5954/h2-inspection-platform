@@ -10,6 +10,7 @@ class Settings:
     data_dir: Path
     command_ttl_ms: int = 30_000
     hardware_teleop: bool = False
+    teleop_gateway_address: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -22,4 +23,5 @@ class Settings:
             data_dir=Path(os.getenv("H2_DATA_DIR", ".local/backend-data")).resolve(),
             command_ttl_ms=int(os.getenv("H2_COMMAND_TTL_MS", "30000")),
             hardware_teleop=os.getenv("H2_HARDWARE_TELEOP") == "1",
+            teleop_gateway_address=os.getenv("H2_TELEOP_GATEWAY_ADDRESS"),
         )
