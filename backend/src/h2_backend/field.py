@@ -16,8 +16,8 @@ import subprocess
 import time
 import urllib.request
 
-PC2 = "192.168.124.162"
-PC3 = "192.168.124.163"
+PC2 = os.environ.get("H2_PC2_HOST", "192.168.124.162")
+PC3 = os.environ.get("H2_PC3_HOST", "192.168.124.163")
 PC2_AGENT_URL = f"http://{PC2}:8090/environment"
 FORWARD_PORTS = (15051, 15052)
 

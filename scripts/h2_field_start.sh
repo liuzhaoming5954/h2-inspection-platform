@@ -11,12 +11,17 @@
 # Before upgrading, deploy the new PC2 script to ~/sensor_agent.py and stop
 # the old PC2 and PC3 processes. See robot-gateway/H2_COMMISSIONING.md.
 #
-# Usage: scripts/h2_field_start.sh   then open http://127.0.0.1:5173
+# Usage: scripts/h2_field_start.sh [--robot-only]
+#   --robot-only: bring up PC2/PC3/forwards and stop there (no workstation
+#   stack restart, no self-check) - used by dev.py's first-boot hook so the
+#   stack start does not recurse.
 set -u
+ROBOT_ONLY=0
+[ "${1:-}" = "--robot-only" ] && ROBOT_ONLY=1
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-PC2=192.168.124.162
-PC3=192.168.124.163
+PC2="${H2_PC2_HOST:-192.168.124.162}"
+PC3="${H2_PC3_HOST:-192.168.124.163}"
 LOG_DIR="$ROOT/.runtime/logs"
 mkdir -p "$LOG_DIR"
 
@@ -53,10 +58,12 @@ if sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
     'pgrep -f "[h]2_gateway.server" >/dev/null' 2>/dev/null; then
   echo "   already running"
 else
-  sshpass -p "$PASS" ssh unitree@"$PC3" \
+  # nohup-over-ssh can hang the channel even with </dev/null, so bound it:
+  # the backgrounded process still lands on PC3, the probe below decides.
+  timeout 15 sshpass -p "$PASS" ssh unitree@"$PC3" \
     'cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &' \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
-    && echo "   started" || echo "   FAILED (PC3 offline?)"
+    && echo "   started" || echo "   launch command timed out or failed - probing to confirm"
   sleep 3
 fi
 
@@ -68,10 +75,10 @@ for mapping in 15051:50051 15052:50052; do
   forward="127.0.0.1:$local_port:127.0.0.1:$pc3_port"
   listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
   if [ -z "$listener" ]; then
-    sshpass -p "$PASS" ssh -N -T -f -S none \
+    timeout 15 sshpass -p "$PASS" ssh -N -T -f -S none \
       -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
-      -L "$forward" unitree@"$PC3" || exit 1
+      -L "$forward" unitree@"$PC3" || { echo "   forward $mapping failed (PC3 offline?)"; continue; }
     listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
   fi
   if [[ $listener =~ pid=([0-9]+), ]]; then
@@ -88,6 +95,11 @@ for mapping in 15051:50051 15052:50052; do
   echo "NOT READY: port $local_port must use its own SSH process for $mapping. Check the existing listener."
   exit 1
 done
+
+if [ "$ROBOT_ONLY" = 1 ]; then
+  echo "== --robot-only: robot-side components up, workstation stack handled by caller =="
+  exit 0
+fi
 
 echo "== 4/4 workstation stack (external gateway) =="
 .venv/bin/python scripts/dev.py stop >>"$LOG_DIR/dev-supervisor.log" 2>&1 || exit 1
