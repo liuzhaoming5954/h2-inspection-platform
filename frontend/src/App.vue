@@ -323,6 +323,15 @@ onBeforeUnmount(() => {
             <div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div>
             <div class="metric-foot">{{ environmentNote }}</div>
           </div>
+          <div v-if="hardwareMode" class="metric-card">
+            <div class="metric-top"><span>机器人位姿</span><span class="metric-icon">⌖</span></div>
+            <div v-if="robot?.pose" style="font-size:15px;line-height:1.6" class="metric-value">
+              <span>x {{ robot.pose.x.toFixed(2) }}　y {{ robot.pose.y.toFixed(2) }} m</span><br>
+              <span>yaw {{ (robot.pose.yaw * 180 / Math.PI).toFixed(0) }}°</span>
+            </div>
+            <div v-else class="metric-value">—</div>
+            <div class="metric-foot">开机点坐标系 · 实时里程计</div>
+          </div>
           <template v-else>
             <div class="metric-card"><div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div><div class="metric-value">{{ battery === undefined ? '—' : battery.toFixed(0) }}<span class="metric-unit">%</span><span class="small-status">{{ robot?.status ? stateNames[robot.status] ?? robot.status : '状态未知' }}</span></div><div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div></div>
             <div class="metric-card"><div class="metric-top"><span>任务完成进度</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ progress.toFixed(0) }}<span class="metric-unit">%</span><el-tag size="small" :type="stateTone" effect="light">{{ taskState }}</el-tag></div><div class="metric-foot">已采集 {{ samples.length }} / {{ points.length }} 个巡检点</div></div>

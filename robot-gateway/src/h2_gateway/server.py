@@ -22,6 +22,7 @@ from h2_gateway.hardware import (
     AgentEnvironment,
     BmsWatcher,
     H2HardwareGateway,
+    OdomWatcher,
     UnitreeLoco,
     emit_event,
 )
@@ -140,12 +141,18 @@ def main() -> None:
                 battery = BmsWatcher()
             except Exception as error:  # SDK present but BMS unavailable: degrade.
                 print(json.dumps({"warning": f"bms watcher unavailable: {error}"}), flush=True)
+            odom = None
+            try:
+                odom = OdomWatcher()
+            except Exception as error:  # Odometry service absent: pose stays null.
+                print(json.dumps({"warning": f"odom watcher unavailable: {error}"}), flush=True)
             engine = H2HardwareGateway(
                 loco,
                 AgentEnvironment(
                     os.environ.get("H2_SENSOR_AGENT_URL", DEFAULT_SENSOR_AGENT_URL)
                 ).start(),
                 battery,
+                odom,
             )
         except (RuntimeError, ValueError) as error:
             parser.error(str(error))

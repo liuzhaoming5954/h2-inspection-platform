@@ -148,6 +148,41 @@ class BmsWatcher:
         return reading[1]
 
 
+class OdomWatcher:
+    """Subscribe the H2 odometry topic (rt/odommodestate, ~500 Hz) and keep the
+    latest pose for state polls.
+
+    The documented low-frequency variant (rt/lf/odommodestate) is absent on
+    early firmware, so this uses the high-frequency topic and simply keeps the
+    most recent sample under a lock — the poll rate is ~1 Hz. World frame:
+    origin at power-on, x forward, y left (resets on reboot)."""
+
+    def __init__(self, topic: str = "rt/odommodestate", *, fresh_seconds: float = 2.0):
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+
+        self._lock = threading.Lock()
+        self._fresh_seconds = fresh_seconds
+        self._reading: tuple[float, dict] | None = None  # (monotonic, pose)
+        self._subscriber = ChannelSubscriber(topic, SportModeState_)
+        self._subscriber.Init(self._on_message, 1)
+
+    def _on_message(self, message) -> None:
+        with self._lock:
+            self._reading = (time.monotonic(), {
+                "x": float(message.position[0]),
+                "y": float(message.position[1]),
+                "yaw": float(message.imu_state.rpy[2]),
+            })
+
+    def pose(self) -> dict | None:
+        with self._lock:
+            reading = self._reading
+        if reading is None or time.monotonic() - reading[0] > self._fresh_seconds:
+            return None
+        return reading[1]
+
+
 class AgentEnvironment:
     """Poll the PC2 RS-485 sensor agent; serve the last fresh reading.
 
@@ -283,10 +318,11 @@ class H2HardwareGateway:
     """One serialized SDK writer and one non-persistent control lease."""
 
     def __init__(self, loco: Loco, environment: EnvironmentSource | None = None,
-                 battery: BatterySource | None = None):
+                 battery: BatterySource | None = None, odom: "OdomWatcher | None" = None):
         self._loco = loco
         self._environment = environment
         self._battery = battery
+        self._odom = odom
         self._lock = _SDKLock()
         self._shutdown = threading.Event()
         self._fsm: tuple[int, int | None] | None = None
@@ -428,6 +464,10 @@ class H2HardwareGateway:
             percent = self._battery.battery()
             if percent is not None:
                 state["battery_percent"] = percent
+        if self._odom is not None:
+            pose = self._odom.pose()
+            if pose is not None:
+                state["pose"] = pose
         return state
 
     def teleop_acquire(self) -> dict:
