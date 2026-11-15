@@ -30,7 +30,7 @@ def test_wall_clock_jump_does_not_affect_hardware_commands(ready_gateway, monkey
     monkeypatch.setattr(time, "time_ns", lambda: wall_time + jump)
     assert gateway.teleop_command(token, 1, "heartbeat", now_ms() + 300)["code"] == "renewed"
     assert gateway.teleop_command(token, 2, "forward", now_ms() + 300)["code"] == "applied"
-    assert loco.commands.get_nowait()[0] == (0.15, 0.0, 0.0)
+    assert loco.commands.get_nowait()[0] == (0.5, 0.0, 0.0)
     assert gateway.teleop_command(token, 3, "stop", None)["code"] == "stopped"
     assert loco.commands.get_nowait()[0] == (0.0, 0.0, 0.0)
 

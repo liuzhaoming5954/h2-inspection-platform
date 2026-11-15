@@ -43,12 +43,17 @@ MIN_VELOCITY_DURATION = 0.04
 MAX_HARDWARE_COMMAND_MS = 350
 ENVIRONMENT_SAMPLE_ID = re.compile(r"([0-9a-f]{32}):([1-9][0-9]{0,15})")
 
-# Initial supervised trial limits. The H2's built-in controller owns gait and balance.
+# Field-verified trial limits (2026-11-15, motion bench on the real H2): the
+# built-in HybridWalk controller in FSM 601 only lifts its feet above a speed
+# threshold — at 0.15 m/s / 0.25 rad/s every accepted command produced balance
+# adjustments only (lean, in-place yaw), never a step. Walking starts between
+# 0.3 and 0.5 m/s; sustained stream and single commands were both verified at
+# the values below. The H2's built-in controller still owns gait and balance.
 VELOCITIES = {
-    "forward": (0.15, 0.0, 0.0),
-    "backward": (-0.15, 0.0, 0.0),
-    "turn_left": (0.0, 0.0, 0.25),
-    "turn_right": (0.0, 0.0, -0.25),
+    "forward": (0.5, 0.0, 0.0),
+    "backward": (-0.5, 0.0, 0.0),
+    "turn_left": (0.0, 0.0, 0.55),
+    "turn_right": (0.0, 0.0, -0.55),
 }
 
 

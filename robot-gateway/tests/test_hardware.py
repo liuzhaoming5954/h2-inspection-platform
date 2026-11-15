@@ -64,7 +64,7 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     assert loco.commands.empty()
     assert send(gateway, token, 3, "forward")["accepted"]
     speed, duration = loco.commands.get(timeout=1)
-    assert speed == (0.15, 0, 0)
+    assert speed == (0.5, 0, 0)
     assert 0 < duration <= 0.25
     assert send(gateway, token, 3, "backward")["code"] == "stale_sequence"
     assert send(gateway, token, 4, "heartbeat")["accepted"]
@@ -72,7 +72,7 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
     # …but no longer revokes the lease: a fresh motion command resumes.
     assert send(gateway, token, 5, "forward")["accepted"]
-    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
     assert gateway.get_state()["motion"] == "stop_requested"
     assert loco.commands.empty()
@@ -88,7 +88,7 @@ def test_uncertain_movement_revokes_lease_and_requests_zero(hardware, stop_fails
     reply = send(gateway, token, 1, "turn_right")
     assert not reply["accepted"]
     assert reply["code"] == ("stop_unconfirmed" if stop_fails else "sdk_rejected")
-    assert loco.commands.get(timeout=1)[0] == (0, 0, -0.25)
+    assert loco.commands.get(timeout=1)[0] == (0, 0, -0.55)
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
     state = gateway.get_state()
     assert not state["teleop_active"]
@@ -116,7 +116,7 @@ def test_an_ordered_stop_from_the_owner_needs_no_valid_deadline(hardware):
     gateway, loco = hardware
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "forward")["accepted"]
-    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
     # Stop may always use an expired deadline, subject to owner and order.
     assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert send(gateway, "wrong-token", 2, "stop", ttl=1200)["code"] == "invalid_token"
@@ -179,7 +179,7 @@ def test_queued_stop_then_direction_outrank_status(hardware, monkeypatch, direct
         else:
             assert direction.result(timeout=1)["code"] == "applied"
             assert status.result(timeout=1)["motion"] == "forward"
-            assert loco.commands.get_nowait()[0] == (0.15, 0, 0)
+            assert loco.commands.get_nowait()[0] == (0.5, 0, 0)
 
 
 def test_controller_link_loss_latches_unconfirmed_stop(hardware):
@@ -187,7 +187,7 @@ def test_controller_link_loss_latches_unconfirmed_stop(hardware):
     state_before_loss = gateway.get_state()["updated_at"]
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "forward")["accepted"]
-    assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+    assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
     loco.reject_motion.set()
     loco.reject_stop.set()
     loco.state = None
@@ -213,6 +213,6 @@ def test_shutdown_requests_zero_and_gateway_refuses_nonlocal_bind(hardware):
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "backward")["accepted"]
     gateway.close()
-    assert loco.commands.get(timeout=1)[0] == (-0.15, 0, 0)
+    assert loco.commands.get(timeout=1)[0] == (-0.5, 0, 0)
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
     assert gateway.teleop_acquire()["code"] == "hardware_unavailable"

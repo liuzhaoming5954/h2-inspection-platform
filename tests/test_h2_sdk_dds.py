@@ -84,12 +84,12 @@ def test_h2_hardware_path_over_loopback_dds(tmp_path, monkeypatch):
                     lease = ws.receive_json()
                     assert lease["accepted"] and lease["code"] == "acquired" and "token" not in lease
                     steps = (
-                        ("forward", (0.15, 0.0, 0.0), "applied"),
-                        ("backward", (-0.15, 0.0, 0.0), "applied"),
-                        ("turn_left", (0.0, 0.0, 0.25), "applied"),
-                        ("turn_right", (0.0, 0.0, -0.25), "applied"),
+                        ("forward", (0.5, 0.0, 0.0), "applied"),
+                        ("backward", (-0.5, 0.0, 0.0), "applied"),
+                        ("turn_left", (0.0, 0.0, 0.55), "applied"),
+                        ("turn_right", (0.0, 0.0, -0.55), "applied"),
                         ("stop", (0.0, 0.0, 0.0), "stopped"),
-                        ("forward", (0.15, 0.0, 0.0), "applied"),
+                        ("forward", (0.5, 0.0, 0.0), "applied"),
                     )
                     for sequence, (action, expected, code) in enumerate(steps, start=1):
                         ws.send_json({"action": action, "sequence": sequence,

@@ -101,7 +101,7 @@ def test_hardware_motion_stop_and_disconnect_through_local_api(hardware_stack):
         for sequence, direction in enumerate(directions, start=1):
             assert command(socket, direction, sequence)["code"] == "applied"
         assert [velocity[:3] for velocity in loco.requests] == [
-            (0.15, 0.0, 0.0), (-0.15, 0.0, 0.0), (0.0, 0.0, 0.25), (0.0, 0.0, -0.25),
+            (0.5, 0.0, 0.0), (-0.5, 0.0, 0.0), (0.0, 0.0, 0.55), (0.0, 0.0, -0.55),
         ]
         assert all(0 < velocity[3] <= 0.25 for velocity in loco.requests)
         stopped = command(socket, "stop", 5)

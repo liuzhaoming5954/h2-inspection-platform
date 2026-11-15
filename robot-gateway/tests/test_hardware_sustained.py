@@ -53,7 +53,7 @@ def test_late_sdk_acknowledgement_halts_motion_but_keeps_the_lease():
                                        time.monotonic_ns() // 1_000_000 + 350)
         assert reply["accepted"] and reply["code"] == "stopped", reply
         # The late frame executed, then an ordered zero velocity follows it…
-        assert loco.commands.get(timeout=1)[0] == (0.15, 0, 0)
+        assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
         assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
         # …and the lease survives: the next command goes straight through.
         reply = gateway.teleop_command(token, 2, "heartbeat",
