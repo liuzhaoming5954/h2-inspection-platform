@@ -1,4 +1,4 @@
-"""Battery telemetry: bms watcher degradation and wire mapping."""
+"""验证电量遥测在 BMS 缺失时的降级和协议字段映射。"""
 
 import time
 
@@ -24,7 +24,7 @@ def test_gateway_state_carries_battery_until_it_stales():
         wait_for(gateway, lambda state: state["teleop_ready"])
         assert gateway.get_state()["battery_percent"] == 21.0
 
-        battery.percent = None  # BMS topic stale or absent
+        battery.percent = None  # BMS 话题读数过期或缺失
         assert "battery_percent" not in gateway.get_state()
     finally:
         gateway.close()

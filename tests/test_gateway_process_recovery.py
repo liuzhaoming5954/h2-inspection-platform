@@ -1,4 +1,4 @@
-"""Actual process termination/restart, persisted state and gRPC reconciliation."""
+"""验证实际终止并重启进程后的持久化状态与 gRPC 状态同步。"""
 from __future__ import annotations
 
 import socket
@@ -50,7 +50,7 @@ def test_killed_gateway_does_not_resume_or_replay_motion(tmp_path):
         assert result['status'] == 'interrupted'
         assert len(result['samples']) >= 1
         assert restarted.get_state()['start_count'] == 1
-        # The original ACK is durable, but the task snapshot remains interrupted.
+        # 原始 ACK 已持久化，任务快照仍处于中断状态。
         assert restarted.start_task('recovery-task', 'durable-command', deadline_ms, points)['accepted']
         assert restarted.get_task('recovery-task')['status'] == 'interrupted'
         assert restarted.get_state()['start_count'] == 1

@@ -1,4 +1,4 @@
-"""Exercise the browser WebSocket protocol against a real simulator gRPC server."""
+"""使用实际运行的模拟器 gRPC 服务验证浏览器的 WebSocket 协议。"""
 import time
 
 from fastapi.testclient import TestClient
@@ -12,8 +12,8 @@ from h2_gateway.server import create_server
 
 
 ORIGIN = {"origin": "http://127.0.0.1:5173"}
-# Starlette joins relative WebSocket paths against ws://testserver even when
-# the HTTP base_url is overridden. Use the same Host as a local browser.
+# 即使覆盖 HTTP base_url，Starlette 仍以 ws://testserver 解析相对 WebSocket 路径。
+# 使用与本地浏览器一致的 Host。
 SOCKET = "ws://127.0.0.1:5173/api/teleop/ws"
 
 
@@ -86,7 +86,7 @@ def test_movement_expiry_and_inspection_arbitration(stack):
         assert rejected.status_code == 201 and rejected.json()["status"] == "rejected"
         assert command(ws, 1, "forward")["accepted"]
         assert command(ws, 2, "heartbeat")["accepted"]
-        # The WebSocket is still open. A heartbeat must not extend motion validity.
+        # WebSocket 仍保持连接，心跳不能延长运动指令的有效期。
         wait_state(gateway, lambda s: not s["teleop_active"] and s["motion"] == "stop")
         assert command(ws, 3, "forward")["accepted"] is False
     client.app.state.service.recover_outbox()

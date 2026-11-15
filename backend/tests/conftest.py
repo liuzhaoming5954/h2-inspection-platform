@@ -12,7 +12,7 @@ from h2_backend.models import Base
 
 
 class FakeGateway:
-    """Deterministic boundary fake; root end-to-end checks use real gRPC."""
+    """接口边界处使用行为固定的测试替身，根目录的端到端测试使用真实的 gRPC。"""
     def __init__(self):
         self.tasks = {}
         self.commands = {}

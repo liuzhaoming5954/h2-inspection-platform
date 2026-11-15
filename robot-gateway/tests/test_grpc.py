@@ -1,4 +1,4 @@
-"""Exercise real protobuf serialization, a TCP socket, and image bytes."""
+"""验证实际的 Protobuf 序列化、TCP 通信及图像字节传输。"""
 
 import time
 

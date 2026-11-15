@@ -1,4 +1,4 @@
-"""Hardware command deadlines use PC3 monotonic time and fail closed."""
+"""验证真机指令截止时间使用 PC3 单调时钟，校验失败时拒绝指令。"""
 
 import time
 

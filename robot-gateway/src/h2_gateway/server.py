@@ -1,4 +1,4 @@
-"""Run the H2 gRPC gateway on loopback by default."""
+"""运行 H2 gRPC 网关，默认监听回环地址。"""
 
 from __future__ import annotations
 
@@ -139,12 +139,12 @@ def main() -> None:
             battery = None
             try:
                 battery = BmsWatcher()
-            except Exception as error:  # SDK present but BMS unavailable: degrade.
+            except Exception as error:  # SDK 已加载，BMS 不可用时省略电量。
                 print(json.dumps({"warning": f"bms watcher unavailable: {error}"}), flush=True)
             odom = None
             try:
                 odom = OdomWatcher()
-            except Exception as error:  # Odometry service absent: pose stays null.
+            except Exception as error:  # 里程计不可用时，位姿保持为空。
                 print(json.dumps({"warning": f"odom watcher unavailable: {error}"}), flush=True)
             engine = H2HardwareGateway(
                 loco,
@@ -159,9 +159,9 @@ def main() -> None:
     else:
         engine = SimulatorEngine(args.db, step_delay=args.step_delay)
     if args.h2_interface:
-        # Only the gateway package logs events; leave grpc at WARNING. The
-        # wall-clock stamp anchors the monotonic event timeline for offline
-        # analysis of frame continuity and stop latency.
+        # 仅网关包记录这些事件，grpc 保持 WARNING 级别。
+        # 系统时钟时间戳为单调事件时间线提供参照，
+        # 便于离线分析指令帧连续性和停步延迟。
         events = logging.getLogger("h2_gateway")
         events.setLevel(logging.INFO)
         handler = logging.StreamHandler()

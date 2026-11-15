@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# PC2 setup: install pyserial and the sensor agent from this repository.
-# Run ON PC2, from the repository checkout:
+# 配置 PC2，安装 pyserial 和本仓库的传感器代理。
+# 在 PC2 的仓库根目录运行：
 #   bash scripts/deploy/setup_pc2.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

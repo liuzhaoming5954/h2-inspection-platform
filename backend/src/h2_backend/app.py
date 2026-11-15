@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -64,13 +64,13 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
             try:
                 await asyncio.to_thread(service.recover_outbox)
             except Exception:
-                # Database/gateway outages are visible in /api/health. Persistent
-                # outbox records survive and are reconciled on the next pass.
+                # /api/health 会反映数据库或网关故障。
+                # 已持久化的待派发记录会保留，供下一轮核对处理。
                 pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # A slow status read must not use the workers reserved for commands.
+        # 耗时的状态查询应避开为遥控指令保留的工作线程。
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="h2-teleop") if settings.hardware_teleop else None
         app.state.teleop_executor = executor
         worker = None
@@ -108,9 +108,10 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     def health():
         return service.health()
 
-    # Field-link management: manual, human-clicked operations only. The sync
-    # handlers block for seconds (SSH), FastAPI runs them in its threadpool.
-    @app.get("/api/field/status")
+    # 现场链路的探测与恢复接口只在真机模式下注册。
+    field_routes = APIRouter(prefix="/api/field")
+
+    @field_routes.get("/status")
     def field_status():
         try:
             connected = service.health().get("gateway") == "connected"
@@ -118,26 +119,29 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
             connected = False
         return field.status(connected)
 
-    @app.post("/api/field/reconnect-forwards")
+    @field_routes.post("/reconnect-forwards")
     def field_reconnect_forwards():
         try:
             return field.reconnect_forwards()
         except Exception as error:
             return {"ok": False, "error": str(error)[:200]}
 
-    @app.post("/api/field/start-pc2")
+    @field_routes.post("/start-pc2")
     def field_start_pc2():
         try:
             return field.start_pc2_agent()
         except Exception as error:
             return {"ok": False, "error": str(error)[:200]}
 
-    @app.post("/api/field/start-pc3")
+    @field_routes.post("/start-pc3")
     def field_start_pc3():
         try:
             return field.start_pc3_gateway()
         except Exception as error:
             return {"ok": False, "error": str(error)[:200]}
+
+    if settings.hardware_teleop:
+        app.include_router(field_routes)
 
     @app.get("/api/robot")
     def robot():

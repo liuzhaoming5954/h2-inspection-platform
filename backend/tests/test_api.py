@@ -49,7 +49,7 @@ def test_samples_files_review_and_three_report_formats(client, app, gateway, pay
     assert data["review_note"] == "人工复核：合成数据链路正确"
     assert len(data["samples"]) == 2
     assert data["data_source"] == "simulated"
-    # Repeated polling must not duplicate stored samples.
+    # 重复轮询时应避免重复保存样本。
     client.get(f"/api/tasks/{task['id']}")
     with app.state.service.sessions() as db:
         assert len(list(db.scalars(select(Sample)))) == 2
@@ -61,7 +61,7 @@ def test_recovery_reconciles_after_gateway_accepted_without_restarting(client, a
     task = client.post("/api/tasks", json=payload).json()
     with app.state.service.sessions.begin() as db:
         box = db.scalar(select(Outbox).where(Outbox.task_id == task["id"]))
-        box.status = "pending"  # Simulate DB acknowledgement lost after gateway accepted.
+        box.status = "pending"  # 模拟网关接受指令后丢失数据库回执。
     app.state.service.recover_outbox()
     assert gateway.starts == 1
     with app.state.service.sessions() as db:

@@ -54,16 +54,16 @@ class GatewayClock:
         return None
 
     def translate(self, deadline_ns: int) -> int:
-        # PC3 stamped its own monotonic clock before this host received the
-        # reply. Reply transit makes this translated deadline earlier, never later.
+        # PC3 先记录自身的单调时钟，上位机随后收到回执。
+        # 回执的传输时间只会让换算得到的截止时间提前。
         return self.milliseconds + (deadline_ns - self.received_ns) // 1_000_000
 
 
 PendingCommand = QueuedCommand | Literal["idle_timeout"] | None
 
 
-# Send fixed public messages. Gateway replies can contain a private lease token
-# or diagnostic text that should never appear in a browser frame.
+# 只发送预设的公开提示，避免把网关回执中可能包含的私有租约令牌
+# 或内部诊断信息放入浏览器消息帧。
 MESSAGES = {
     "acquired": "已获得模拟遥控控制权。",
     "applied": "已应用模拟遥控指令。",
@@ -169,7 +169,7 @@ def command_deadline(command: TeleopInput, now_ms: int) -> tuple[int, str | None
 
 async def buffer_hardware_commands(websocket: WebSocket, send: SendReply,
                                    pending: asyncio.Queue[PendingCommand]) -> None:
-    """Keep one waiting frame behind the active RPC and protect stop/release from replacement."""
+    """在执行中的 RPC 后保留一个待发送帧，防止停步或释放指令被覆盖。"""
     ending: PendingCommand = None
     latest_sequence = 0
     release_queued = False
@@ -202,8 +202,8 @@ async def buffer_hardware_commands(websocket: WebSocket, send: SendReply,
         pass
     finally:
         if not release_queued:
-            # Discard waiting motion when input ends. The active RPC remains
-            # serialized with the lease release in teleop_socket.
+            # 输入结束时丢弃待发送的运动指令。
+            # 在途 RPC 和租约释放仍由 teleop_socket 串行处理。
             if not pending.empty():
                 pending.get_nowait()
             pending.put_nowait(ending)
@@ -316,8 +316,8 @@ async def teleop_socket(websocket: WebSocket, gateway: Any, *, hardware_teleop: 
                 if command.action == "release":
                     result = await call(gateway.teleop_release, token)
                 elif deadline_ns is not None:
-                    # Recheck in the control worker before starting the RPC. The
-                    # PC3 deadline also expires while this job waits for a worker.
+                    # 控制工作线程发起 RPC 前再次检查时效。
+                    # 等待线程期间也可能已超过 PC3 的截止时间。
                     def dispatch() -> dict[str, Any]:
                         timeout = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
                         if timeout <= 0:
@@ -337,8 +337,8 @@ async def teleop_socket(websocket: WebSocket, gateway: Any, *, hardware_teleop: 
                 return
 
             if hardware_teleop and accepted:
-                # The gateway can stop a direction frame if its SDK reply
-                # arrived after the frame's deadline, while retaining the lease.
+                # 如果 SDK 回执在方向指令帧过期后才到达，
+                # 网关可以让机器人停步并保留租约。
                 expected = HARDWARE_ACKS.get(command.action, "applied")
                 updated_clock = GatewayClock.from_reply(result)
                 if updated_clock is None or (code != expected and not (expected == "applied" and code == "stopped")):

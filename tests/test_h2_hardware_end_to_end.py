@@ -1,4 +1,4 @@
-"""Exercise the H2 mode through WebSocket and gRPC with a recording SDK substitute."""
+"""使用记录调用的 SDK 替身，通过 WebSocket 和 gRPC 验证 H2 真机模式。"""
 
 import time
 from concurrent.futures import ThreadPoolExecutor

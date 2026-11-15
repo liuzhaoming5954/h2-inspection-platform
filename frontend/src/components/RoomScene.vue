@@ -20,8 +20,8 @@ const position = computed(() => {
 })
 const heading = computed(() => {
   const yaw = (props.robot?.pose ?? props.robot?.position)?.yaw
-  // Simulator +y maps to scene +z; positive simulator yaw therefore rotates
-  // the scene model clockwise about Three's vertical (+y) axis.
+  // 模拟器的 +y 对应场景的 +z，因此正向偏航角会让模型绕
+  // Three.js 的竖直轴（+y）顺时针旋转。
   return typeof yaw === 'number' && Number.isFinite(yaw) ? -yaw : 0
 })
 const targetPosition = new THREE.Vector3()

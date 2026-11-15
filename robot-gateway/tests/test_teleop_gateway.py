@@ -38,7 +38,7 @@ def test_watchdog_stops_without_reads_and_old_token_cannot_take_over(tmp_path):
         assert engine.teleop_command(token, 1, "forward", now_ms() + 240)["accepted"]
 
         def released_by_worker():
-            # Observe only: get_state itself would settle elapsed time too.
+            # 这里只观察状态，调用 get_state 本身也会按已过去的时间结算运动。
             with engine._lock:
                 return not engine._teleop.token
 

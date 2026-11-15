@@ -12,6 +12,13 @@ frontend/*.tsbuildinfo
 .env.*
 .local/
 .agents/
+!/.agents/
+/.agents/**
+!/.agents/skills/
+!/.agents/skills/h2-change-review/
+!/.agents/skills/h2-change-review/SKILL.md
+!/.agents/skills/h2-change-review/agents/
+!/.agents/skills/h2-change-review/agents/openai.yaml
 .aws/
 .codex/
 artifacts/

@@ -26,7 +26,7 @@ if _version_not_supported:
 
 
 class RobotGatewayStub:
-    """Local simulator or H2 high-level hardware teleoperation gateway.
+    """本机模拟器或 H2 真机高层遥控的网关服务。
     """
 
     def __init__(self, channel):
@@ -73,7 +73,7 @@ class RobotGatewayStub:
 
 
 class RobotGatewayServicer:
-    """Local simulator or H2 high-level hardware teleoperation gateway.
+    """本机模拟器或 H2 真机高层遥控的网关服务。
     """
 
     def GetState(self, request, context):
@@ -165,7 +165,7 @@ def add_RobotGatewayServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class RobotGateway:
-    """Local simulator or H2 high-level hardware teleoperation gateway.
+    """本机模拟器或 H2 真机高层遥控的网关服务。
     """
 
     @staticmethod

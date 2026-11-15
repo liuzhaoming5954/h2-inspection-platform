@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
@@ -52,8 +52,8 @@ const teleopLocked = computed(() => teleopSession.value || remoteTeleop.value)
 const teleopDisabledReason = computed(() => {
   if (hardwareMode.value) {
     if (hardwareConfigured.value !== true || robot.value?.simulated === true) return '等待真机遥控模式确认'
-    // The control gateway checks live readiness for the lease and each request.
-    // A delayed status poll must not stop an otherwise healthy control session.
+    // 遥控网关在授予控制权和处理每次请求时检查实时就绪状态。
+    // 状态轮询延迟时，仍允许正常的遥控会话继续运行。
     if (teleopSession.value) return ''
     if (!connected.value || !robot.value) return '等待服务和机器人连接'
     if (robot.value.status === 'fault') return '真机遥控故障，请检查网关和机器人'
@@ -68,10 +68,9 @@ const samples = computed(() => selectedTask.value?.samples ?? [])
 const latestSample = computed(() => samples.value.at(-1))
 const reports = computed(() => selectedTask.value?.reports ?? [])
 const battery = computed(() => robot.value?.battery_percent ?? robot.value?.battery)
-// 3D view re-anchoring: the odometry frame cannot be reset on the robot, so the
-// scene keeps a captured anchor instead — the displayed pose is the live pose
-// minus the anchor, snapping the model to the scene centre on demand. The pose
-// card keeps showing the raw power-on frame (telemetry fact).
+// 三维视图通过保存当前位姿作为基准来重置显示原点。
+// 场景显示实时位姿相对基准的偏移，重置时模型会移到场景中心。
+// 机器人里程计仍以开机点为原点，位姿卡继续显示原始遥测值。
 const poseAnchor = ref<{ x: number; y: number; yaw: number } | null>(null)
 const displayRobot = computed(() => {
   const current = robot.value
@@ -85,22 +84,31 @@ function resetViewAnchor() {
   if (pose) poseAnchor.value = { x: pose.x, y: pose.y, yaw: pose.yaw }
 }
 
-// Field-link panel: manual, human-clicked operations only. Nothing reconnects
-// by itself - the lights show the chain, the buttons do one thing each.
+// 链路管理区用指示灯显示各环节状态。
+// 每个按钮在操作员点击后执行对应操作，连接恢复也由操作员触发。
 interface FieldStatus { pc2_agent: boolean; forwards: Record<string, boolean>; gateway: boolean }
 const fieldStatus = ref<FieldStatus | null>(null)
 const fieldBusy = ref('')
 const fieldMessage = ref('')
-let fieldTimer: ReturnType<typeof setInterval> | undefined
 
 async function pollField() {
+  if (disposed || hardwareConfigured.value !== true) return
   try {
-    fieldStatus.value = await request<FieldStatus>('/api/field/status', { cache: 'no-store' })
-  } catch { /* The panel simply keeps its last snapshot between polls. */ }
+    const status = await request<FieldStatus>('/api/field/status', { cache: 'no-store' })
+    if (!disposed && hardwareConfigured.value === true) fieldStatus.value = status
+  } catch { /* 查询失败时沿用上一次收到的状态。 */ }
 }
 
+watch(hardwareConfigured, (configured, _, onCleanup) => {
+  fieldStatus.value = null
+  if (configured !== true) return
+  void pollField()
+  const timer = setInterval(() => { if (!fieldBusy.value) void pollField() }, 5000)
+  onCleanup(() => clearInterval(timer))
+})
+
 async function fieldAction(kind: 'reconnect-forwards' | 'start-pc2' | 'start-pc3') {
-  if (fieldBusy.value) return
+  if (hardwareConfigured.value !== true || fieldBusy.value) return
   fieldBusy.value = kind
   fieldMessage.value = ''
   try {
@@ -157,8 +165,8 @@ function updateHardwareEnvironment(state: RobotState, requestStartedAt: number) 
     freshEnvironment.value = null
     return
   }
-  // Start at request time to conservatively count the whole HTTP round trip.
-  // A repeated sample may shorten its deadline but can never reset it.
+  // 从请求发出时开始计时，将整个 HTTP 往返耗时计入样本年龄。
+  // 重复收到同一条样本时，截止时间只会提前或保持原值。
   const expiresAt = previous?.sequence === sequence
     ? Math.min(previous.expiresAt, requestStartedAt + remaining) : requestStartedAt + remaining
   environmentWatermarks.set(instance, { sequence, expiresAt })
@@ -201,8 +209,8 @@ async function sync() {
   }
 }
 
-// One serialized robot poller owns the displayed pose, independent of task
-// requests. A slower task/health response can never overwrite a new pose.
+// 页面位姿只由串行执行的机器人状态轮询更新。
+// 任务和健康检查独立请求，较慢的响应不会覆盖新位姿。
 async function pollRobot() {
   if (disposed || robotRequest) return
   clearTimeout(robotPollTimer)
@@ -315,8 +323,6 @@ function openReview() { reviewNote.value = selectedTask.value?.review_note ?? ''
 onMounted(() => {
   void poll()
   void pollRobot()
-  void pollField()
-  fieldTimer = setInterval(() => { if (!fieldBusy.value) void pollField() }, 5000)
   clockTimer = setInterval(() => { clock.value = new Date() }, 1000)
 })
 onBeforeUnmount(() => {
@@ -324,7 +330,6 @@ onBeforeUnmount(() => {
   clearTimeout(pollTimer)
   clearTimeout(robotPollTimer)
   clearTimeout(environmentTimer)
-  clearInterval(fieldTimer)
   clearInterval(clockTimer)
   robotRequest?.abort()
 })
@@ -332,10 +337,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ 'hardware-sidebar': hardwareMode }">
       <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2 真机遥控' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'TELEOP CONSOLE' : 'INSPECTION CONSOLE' }}</span></span></a>
-      <div class="workspace-label">验证工作区</div>
-      <div class="nav-item active"><span class="nav-symbol">▦</span> {{ hardwareMode ? '真机遥控台' : '巡检验证台' }} <span class="nav-selected"></span></div>
+      <template v-if="!hardwareMode">
+        <div class="workspace-label">验证工作区</div>
+        <div class="nav-item active"><span class="nav-symbol">▦</span> 巡检验证台 <span class="nav-selected"></span></div>
+      </template>
       <TeleopPanel v-if="modeKnown && hardwareMode" class="sidebar-teleop" :class="{ 'lease-held': teleopSession }" compact :robot="robot" :hardware="true" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
       <template v-if="modeKnown && !hardwareMode">
         <div class="sidebar-section">验证链路</div>
@@ -350,7 +357,7 @@ onBeforeUnmount(() => {
     <main class="main-content">
       <header class="topbar"><div class="breadcrumb">{{ hardwareMode ? 'H2 真机' : '巡检管理' }} <span>/</span> 技术验证台</div><div class="topbar-right"><span class="env-tag">开发验证</span><time>{{ clock.toLocaleString('zh-CN', { hour12: false }) }}</time><span class="avatar">验</span></div></header>
       <div class="page-content">
-      <section v-if="modeKnown && hardwareMode" class="field-strip" aria-label="链路管理">
+      <section v-if="hardwareConfigured === true" class="field-strip" aria-label="链路管理">
         <span class="field-strip-title">链路管理</span>
         <div class="field-lights">
           <span :class="['field-light', { on: fieldStatus?.pc2_agent }]"><i></i>PC2 代理</span>
@@ -363,14 +370,14 @@ onBeforeUnmount(() => {
           <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2 代理' }}</button>
           <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3 网关' }}</button>
         </div>
-        <small v-if="fieldMessage" class="field-message">{{ fieldMessage }}</small>
+        <small v-if="fieldMessage" class="field-message" role="status">{{ fieldMessage }}</small>
       </section>
         <div class="page-heading"><div><div class="eyebrow">{{ hardwareMode ? 'H2 LOCOMOTION' : 'ROBOT INSPECTION / PROOF OF CONCEPT' }}</div><h1>{{ hardwareMode ? 'H2 真机遥控验证台' : '巡检技术验证台' }}</h1><p>{{ hardwareMode ? '通过宇树高层运动服务验证前进、后退、转向和停步。' : '连接任务、机器人与巡检证据，验证完整业务链路。' }}</p></div><button class="api-link" type="button" @click="refreshAll"><span>↻</span> 刷新状态</button></div>
         <div v-if="hardwareMode" class="validation-banner hardware-banner"><span class="banner-icon">i</span><div><strong>H2 真机模式</strong><span>方向指令会驱动实际机器人。停步请求获应答后，请在现场确认机器人停稳。</span></div></div>
         <div v-else-if="modeKnown" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
         <div v-if="connectionError" class="connection-alert" role="alert"><strong>服务连接异常</strong><span>{{ connectionError }}</span><button @click="refreshAll">重新连接</button></div>
 
-        <section v-if="modeKnown" class="metrics" :aria-label="hardwareMode ? '真机连接与遥控状态' : '机器人与任务概况'">
+        <section v-if="modeKnown" class="metrics" :class="{ 'hardware-metrics': hardwareMode }" :aria-label="hardwareMode ? '真机连接与遥控状态' : '机器人与任务概况'">
           <div class="metric-card"><div class="metric-top"><span>机器人连接</span><span class="metric-icon">⌁</span></div><div class="metric-value connection-value"><span :class="['status-dot', connected ? 'online' : 'offline']"></span>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</div><div class="metric-foot">{{ connected ? (robot?.robot_id ?? (hardwareMode ? 'H2 真机' : 'H2 模拟机器人')) : '等待业务服务和网关' }}</div></div>
           <div v-if="hardwareMode" class="metric-card">
             <div class="metric-top"><span>高层运动服务</span><span class="metric-icon">◎</span></div>
@@ -389,8 +396,8 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="hardwareMode" class="metric-card">
             <div class="metric-top"><span>机器人位姿</span><span class="metric-icon">⌖</span></div>
-            <div v-if="robot?.pose" style="font-size:15px;line-height:1.6" class="metric-value">
-              <span>x {{ robot.pose.x.toFixed(2) }}　y {{ robot.pose.y.toFixed(2) }} m</span><br>
+            <div v-if="robot?.pose" class="metric-value pose-value">
+              <span>x {{ robot.pose.x.toFixed(2) }}　y {{ robot.pose.y.toFixed(2) }} m</span>
               <span>yaw {{ (robot.pose.yaw * 180 / Math.PI).toFixed(0) }}°</span>
             </div>
             <div v-else class="metric-value">—</div>
@@ -446,8 +453,7 @@ onBeforeUnmount(() => {
   grid-template-areas: 'map teleop' 'image teleop';
 }
 .hardware-map { grid-area: map; }
-/* With the teleop panel docked into the fixed sidebar, the 3D scene takes
-   its former right column: map + live pose + camera side by side. */
+/* 遥控面板固定在侧栏后，三维场景占用原来的右列，与地图和相机窗口并排。 */
 .hardware-workspace > .scene-panel { grid-area: teleop; }
 .hardware-image { grid-area: image; }
 .hardware-workspace > .teleop-panel { grid-area: teleop; }
@@ -455,22 +461,27 @@ onBeforeUnmount(() => {
   .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image'; }
 }
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
-.sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; }
+.hardware-sidebar .brand { padding-bottom: 12px; }
+.sidebar-teleop { flex-shrink: 0; margin: 16px -6px 0; border-radius: 8px; }
 .sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
-/* Field-link strip: manual chain status and one-shot SSH actions, docked at
-   the top of the main content so the sidebar keeps only the teleop dock. */
-.field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 14px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
+.pose-value { display: block; font-size: 15px; line-height: 1.6; }
+.pose-value span { display: block; }
+@media (min-width: 1201px) {
+  .hardware-metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+/* 主区顶部横条显示链路状态，并提供手动触发的 SSH 操作，为侧栏留出遥控空间。 */
+.field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
 .field-strip-title { color: #4e6675; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
-.field-lights { display: flex; gap: 16px; }
-.field-light { display: flex; align-items: center; gap: 6px; color: #8a9dab; font-size: 11px; }
+.field-lights { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.field-light { display: flex; align-items: center; gap: 6px; color: #8a9dab; font-size: 11px; white-space: nowrap; }
 .field-light i { width: 8px; height: 8px; border-radius: 50%; background: #c3d0d9; }
 .field-light.on { color: #496875; }
 .field-light.on i { background: #35a18c; box-shadow: 0 0 5px rgba(53, 161, 140, .5); }
-.field-actions { display: flex; gap: 8px; margin-left: auto; }
+.field-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .field-button { padding: 7px 12px; border: 1px solid #c9dedf; border-radius: 6px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .field-button:hover:not(:disabled) { border-color: #16888b; }
 .field-button:disabled { opacity: .5; cursor: not-allowed; }
-.field-message { color: #718694; font-size: 10px; }
+.field-message { flex-basis: 100%; color: #718694; font-size: 10px; overflow-wrap: anywhere; }
 .heading-actions { display: inline-flex; align-items: center; gap: 8px; }
 .scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .scene-reset:hover:not(:disabled) { border-color: #16888b; }

@@ -1,3 +1,3 @@
-"""Simulator-only gateway; no physical robot connection is implemented."""
+"""H2 巡检平台的机器人网关，提供模拟器与真机接入。"""
 
 __version__ = "0.1.0"

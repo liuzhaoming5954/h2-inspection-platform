@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage a loopback-only PostgreSQL 17 validation instance without root."""
+"""以普通用户身份管理仅监听回环地址的 PostgreSQL 17 验证实例。"""
 from __future__ import annotations
 
 import argparse
@@ -43,7 +43,7 @@ def main() -> None:
         run('pg_ctl', '-D', str(DATA), '-l', str(LOG), '-w', '-o',
             f'-h 127.0.0.1 -p {PORT} -k {shlex.quote(str(SOCKET))}', 'start')
     for database in ['h2_validation', 'h2_test']:
-        # Database names are fixed constants; no user-supplied SQL is interpolated.
+        # SQL 中插入的数据库名称均为固定常量。
         probe = subprocess.run(
             [str(BIN / 'psql'), '-h', '127.0.0.1', '-p', PORT, '-U', 'h2',
              '-d', 'postgres', '-tAc', f"SELECT 1 FROM pg_database WHERE datname='{database}'"],

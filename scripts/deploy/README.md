@@ -47,7 +47,8 @@ export H2_FIELD_PASSWORD='<机器人PC密码>'   # 当前会话或写入个人 s
 
 ## 运行期规则（重要）
 
-- **首次启动**：`dev.py start`（硬件模式）自动执行一次 `h2_field_start.sh --robot-only`，把 PC2/PC3/转发拉起来——开机即四灯绿
+- **一键启动**使用 `~/h2-start.sh` 或 `scripts/h2_field_start.sh`。脚本负责准备 PC2 代理、PC3 网关和两条 SSH 转发。每条转发都须由独立进程监听，并能收到 PC3 网关 `GetState` 的只读应答。任一路失败时显示对应端口并退出，已运行的上位机应用继续运行。`--robot-only` 在这两项检查完成后退出，上位机应用由调用方管理。
+- **手动启动**先按[现场联调说明](../../robot-gateway/H2_COMMISSIONING.md)启动 PC2、PC3 并建立两条 SSH 转发，再用 `dev.py start --external-gateway … --external-teleop-gateway …` 启动上位机。本地启动器直接使用给定的网关地址。
 - **运行中断线**：**永远手动**——用页面上「链路管理」的按钮（重连转发 / 启动 PC2 代理 / 启动 PC3 网关）恢复，系统绝不自动重连。断线恢复前必须经过操作员确认
 - **收工**：`scripts/h2_field_stop.sh`（停上位机与转发，机器人侧进程保留复用）
 

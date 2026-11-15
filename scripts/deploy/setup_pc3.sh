@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PC3 setup: verify/prepare the gateway runtime (Python, SDK2, CycloneDDS).
-# Run ON PC3, from the repository checkout:
+# 配置 PC3，准备并检查网关运行环境（Python、SDK2、CycloneDDS）。
+# 在 PC3 的仓库根目录运行：
 #   bash scripts/deploy/setup_pc3.sh
 #
-# The gateway process itself is started from the workstation (link panel /
-# h2_field_start.sh); this script only prepares the environment.
+# 此脚本只准备运行环境。随后从上位机的链路管理面板或
+# h2_field_start.sh 启动网关进程。
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SDK_DIR="$ROOT/.runtime/h2-sdk2"

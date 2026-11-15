@@ -1,4 +1,4 @@
-"""Ephemeral simulated motion; the owning engine serializes all access."""
+"""管理仅保存在内存中的模拟运动，所有访问由引擎串行处理。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ MAX_COMMAND_FUTURE_MS = 500
 MAX_MOTION_SECONDS = 0.45
 TICK_SECONDS = 0.02
 
-# These values affect only a point in the simulated scene.
+# 这些数值只影响模拟场景中的机器人位置。
 LINEAR_SPEED = 0.35
 TURN_SPEED = 0.8
 DIRECTIONS = frozenset({"forward", "backward", "turn_left", "turn_right"})
@@ -24,7 +24,7 @@ def teleop_reply(accepted: bool, code: str, message: str, token: str = "") -> di
 
 
 class SimulatedTeleop:
-    """An in-memory lease and dead-man timer, deliberately outside the journal."""
+    """仅在内存中维护租约和超时停步计时器。"""
 
     def __init__(self) -> None:
         self.x = self.y = self.yaw = 0.0
@@ -52,7 +52,7 @@ class SimulatedTeleop:
         self.x, self.y = x, y
 
     def advance(self, now: float) -> bool:
-        """Settle elapsed time without ever integrating past either deadline."""
+        """按已过去的时间结算运动，积分上限为两个截止时间中的较早者。"""
         if not self.token:
             return False
         changed = False

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Workstation setup: project dependencies plus the ~/h2-start.sh wrapper.
-# Run ON THE WORKSTATION, from the repository checkout:
+# 配置上位机，安装项目依赖并生成 ~/h2-start.sh 启动脚本。
+# 在上位机的仓库根目录运行：
 #   bash scripts/deploy/setup_workstation.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,12 +20,12 @@ npm install
 echo "== generate ~/h2-start.sh wrapper =="
 cat > "$HOME/h2-start.sh" << 'WRAPPER'
 #!/usr/bin/env bash
-# Field bring-up wrapper. Set your robot PC password here or export
-# H2_FIELD_PASSWORD before calling; it is never stored in the repository.
-export H2_FIELD_PASSWORD="${H2_FIELD_PASSWORD:-}"   # e.g. '...' - fill or export outside
+# 现场启动脚本。将机器人计算机的密码配置在此文件中，
+# 或在调用前导出 H2_FIELD_PASSWORD。密码仅保存在各机本地。
+export H2_FIELD_PASSWORD="${H2_FIELD_PASSWORD:-}"   # 可在此填写，或在外部导出该变量。
 exec "$(dirname "$0")/h2-inspection-platform/scripts/h2_field_start.sh" "$@"
 WRAPPER
-# Resolve the repository path robustly (this checkout may live anywhere).
+# 使用仓库的实际绝对路径，以适配不同的检出位置。
 sed -i "s|\$(dirname \"\$0\")/h2-inspection-platform|$ROOT|" "$HOME/h2-start.sh"
 chmod +x "$HOME/h2-start.sh"
 

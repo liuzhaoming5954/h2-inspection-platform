@@ -1,4 +1,4 @@
-"""Structured h2_event log lines: frames, zero-velocity requests, lease changes."""
+"""验证指令帧、零速度请求和租约变更的结构化 h2_event 日志。"""
 
 import json
 import logging

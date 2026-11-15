@@ -322,8 +322,8 @@ def test_hardware_disables_inspection_and_pending_replay(hardware_client, teleop
         session.add(Task(id="existing-task", request_id="original", request_hash="hash", name="Original task", points=[]))
         session.flush()
         session.add(Outbox(id="existing-command", task_id="existing-task", expires_at_ms=now_ms() + 30000))
-    # Even if a hardware-configured API is pointed at a simulator, it must
-    # neither accept new inspection actions nor replay its old outbox.
+    # 即使配置为真机模式的 API 指向模拟器，
+    # 也应拒绝新的巡检请求并禁止重放旧的待派发记录。
     teleop.simulated = True
     assert hardware_client.get("/api/robot").status_code == 503
     assert hardware_client.get("/api/health").json()["gateway"] == "unavailable"

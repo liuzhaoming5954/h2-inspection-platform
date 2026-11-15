@@ -1,4 +1,4 @@
-"""Synchronous Python facade over the versioned gRPC contract."""
+"""基于版本化 gRPC 契约的同步 Python 客户端。"""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class GatewayClient:
         if separator:
             try:
                 if ip_address(host.strip("[]")).is_loopback:
-                    # Local SSH forwarding must take precedence over an environment proxy.
+                    # 本地 SSH 转发优先于环境变量配置的代理。
                     options.append(("grpc.enable_http_proxy", 0))
             except ValueError:
                 pass

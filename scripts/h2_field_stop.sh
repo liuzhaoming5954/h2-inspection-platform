@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Stop the H2 field stack: workstation services and both SSH forwards.
-# Robot-side services (PC2 agent, PC3 gateway) are left running so the
-# next h2_field_start.sh reuses them; manual stop commands are printed.
+# 停止 H2 现场链路的上位机服务和两条 SSH 转发。
+# PC2 代理和 PC3 网关继续运行，供下次执行 h2_field_start.sh 时复用。
+# 脚本会打印手动停止这些进程的命令。
 #
-# Usage: scripts/h2_field_stop.sh
+# 用法：scripts/h2_field_stop.sh
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

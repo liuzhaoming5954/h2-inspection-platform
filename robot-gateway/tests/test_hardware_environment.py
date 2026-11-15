@@ -1,4 +1,4 @@
-"""Environment telemetry: freshness window, degradation, and wire mapping."""
+"""验证环境遥测的有效期、降级行为和协议字段映射。"""
 
 import io
 import json
@@ -23,7 +23,7 @@ PC2_INSTANCE = 'a' * 32
 
 
 def test_pc2_uses_monotonic_sample_age_and_unique_identity(monkeypatch):
-    # Only exercise the PC2 cache. pyserial is installed on PC2, not required here.
+    # 仅验证 PC2 缓存路径，串口模块 pyserial 由 PC2 安装。
     monkeypatch.setitem(sys.modules, "serial", ModuleType("serial"))
     agent = Path(__file__).resolve().parents[2] / "scripts" / "sensor_agent_pc2.py"
     latest = runpy.run_path(str(agent))["Latest"]()
@@ -84,7 +84,7 @@ def test_agent_environment_uses_monotonic_age_and_conservative_transit(monkeypat
     env._poll_once()
     assert env.sample() == {**reading, "remaining_ms": 5750}
 
-    # Replayed age and independently stepped wall clocks cannot extend the lifetime.
+    # 重放采样年龄或单独调整各机系统时间，都无法延长样本有效期。
     wall_time, monotonic_time = 6000, 55.0
     payload["sample"]["age_seconds"] = 0.0
     env._poll_once()
@@ -98,7 +98,7 @@ def test_agent_environment_uses_monotonic_age_and_conservative_transit(monkeypat
     env._poll_once()
     assert env.sample() is None
 
-    # A genuinely newer sample can carry an earlier PC2 wall timestamp.
+    # 实际采样顺序较新的样本，其 PC2 系统时钟时间戳也可能更早。
     newer = {**reading, "sample_id": f"{PC2_INSTANCE}:2", "captured_at": 4000.0}
     payload["sample"] = {**newer, "age_seconds": 0.5}
     env._poll_once()
@@ -170,7 +170,7 @@ def test_gateway_state_carries_environment_until_it_stales():
         assert state["environment_sample_id"] == f"{PC2_INSTANCE}:1"
         assert state["environment_remaining_ms"] == 8000
 
-        environment.reading = None  # sensor agent offline
+        environment.reading = None  # 传感器代理离线
         state = gateway.get_state()
         assert "temperature_c" not in state
         assert "humidity_percent" not in state

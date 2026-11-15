@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# One-command field startup for H2 hardware teleoperation.
+# 一键启动 H2 真机遥控的现场链路。
 #
-# Brings up, in order: the PC2 RS-485 sensor agent, the PC3 gRPC gateway,
-# the independent SSH local forwards for status (15051 -> 50051) and
-# teleoperation (15052 -> 50052), then the workstation stack. The forwarded
-# ports are bound to loopback on both sides. Running components are reused.
+# 依次启动 PC2 的 RS-485 传感器代理、PC3 的 gRPC 网关，
+# 建立状态（15051 -> 50051）和遥控（15052 -> 50052）各自独立的 SSH 本地转发，
+# 最后启动上位机服务。转发两端的端口均绑定回环地址。
+# 已在运行的组件继续复用。
 #
-# SSH password is read from H2_FIELD_PASSWORD, or prompted once when run
-# from a terminal. Never store robot passwords in this repository.
-# Before upgrading, deploy the new PC2 script to ~/sensor_agent.py and stop
-# the old PC2 and PC3 processes. See robot-gateway/H2_COMMISSIONING.md.
+# 从 H2_FIELD_PASSWORD 读取 SSH 密码，终端交互运行时也可提示输入一次。
+# 机器人密码应保存在现场机器上。
+# 升级前，先将新版 PC2 脚本部署到 ~/sensor_agent.py，并停止 PC2 和 PC3 的旧进程。
+# 详见 robot-gateway/H2_COMMISSIONING.md。
 #
-# Usage: scripts/h2_field_start.sh [--robot-only]
-#   --robot-only: bring up PC2/PC3/forwards and stop there (no workstation
-#   stack restart, no self-check) - used by dev.py's first-boot hook so the
-#   stack start does not recurse.
+# 用法：scripts/h2_field_start.sh [--robot-only]
+#   --robot-only：只启动 PC2、PC3 和转发，跳过上位机重启和自检。
 set -u
 ROBOT_ONLY=0
 [ "${1:-}" = "--robot-only" ] && ROBOT_ONLY=1
@@ -58,8 +56,8 @@ if sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
     'pgrep -f "[h]2_gateway.server" >/dev/null' 2>/dev/null; then
   echo "   already running"
 else
-  # nohup-over-ssh can hang the channel even with </dev/null, so bound it:
-  # the backgrounded process still lands on PC3, the probe below decides.
+  # 即使将标准输入重定向到 /dev/null，通过 SSH 运行 nohup 也可能挂起通道，因此设置超时。
+  # 超时后 PC3 上的后台进程仍可能已启动，由后续探测确认。
   timeout 15 sshpass -p "$PASS" ssh unitree@"$PC3" \
     'cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &' \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
@@ -69,22 +67,26 @@ fi
 
 echo "== 3/4 SSH forwards (status and teleoperation) =="
 previous_forward_pid=
-for mapping in 15051:50051 15052:50052; do
+mappings=(15051:50051 15052:50052)
+for mapping in "${mappings[@]}"; do
   local_port=${mapping%:*}
   pc3_port=${mapping#*:}
   forward="127.0.0.1:$local_port:127.0.0.1:$pc3_port"
   listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
   if [ -z "$listener" ]; then
-    timeout 15 sshpass -p "$PASS" ssh -N -T -f -S none \
+    if ! timeout 15 sshpass -p "$PASS" ssh -N -T -f -S none \
       -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
-      -L "$forward" unitree@"$PC3" || { echo "   forward $mapping failed (PC3 offline?)"; continue; }
+      -L "$forward" unitree@"$PC3"; then
+      echo "NOT READY: SSH forward $mapping failed. Existing workstation services were left unchanged." >&2
+      exit 1
+    fi
     listener=$(ss -Hltnp "sport = :$local_port" | awk -v addr="127.0.0.1:$local_port" '$4 == addr')
   fi
   if [[ $listener =~ pid=([0-9]+), ]]; then
     forward_pid=${BASH_REMATCH[1]}
-    forward_args=$(tr '\0' ' ' < "/proc/$forward_pid/cmdline") || exit 1
-    if [[ $(readlink "/proc/$forward_pid/exe") == */ssh && $forward_args == *" -S none "* \
+    if forward_args=$(tr '\0' ' ' 2>/dev/null < "/proc/$forward_pid/cmdline") \
+      && [[ $(readlink "/proc/$forward_pid/exe") == */ssh && $forward_args == *" -S none "* \
         && $forward_args == *" -L $forward "* && $forward_args == *" unitree@$PC3 "* \
         && $forward_pid != "$previous_forward_pid" ]]; then
       previous_forward_pid=$forward_pid
@@ -92,9 +94,29 @@ for mapping in 15051:50051 15052:50052; do
       continue
     fi
   fi
-  echo "NOT READY: port $local_port must use its own SSH process for $mapping. Check the existing listener."
+  echo "NOT READY: port $local_port must use its own SSH process for $mapping. Check the existing listener." >&2
   exit 1
 done
+
+# 本地端口监听成功后，再确认两条转发都能收到 PC3 网关的只读应答。
+if ! .venv/bin/python - "${mappings[@]}" <<'PY'
+import sys
+
+from h2_gateway.client import GatewayClient
+
+for mapping in sys.argv[1:]:
+    local_port = mapping.split(":", 1)[0]
+    try:
+        with GatewayClient(f"127.0.0.1:{local_port}", timeout=3) as gateway:
+            if gateway.get_state().get("simulated") is not False:
+                raise ValueError("expected an H2 hardware gateway")
+    except Exception as error:
+        sys.exit(f"NOT READY: gRPC GetState failed through SSH forward {mapping}: {error}")
+PY
+then
+  echo "NOT READY: SSH forward checks failed. Existing workstation services were left unchanged." >&2
+  exit 1
+fi
 
 if [ "$ROBOT_ONLY" = 1 ]; then
   echo "== --robot-only: robot-side components up, workstation stack handled by caller =="

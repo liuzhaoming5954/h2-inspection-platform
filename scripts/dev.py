@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start or stop the H2 workstation services and optional local gateway."""
+"""启动或停止 H2 上位机服务及可选的本地网关。"""
 from __future__ import annotations
 
 import argparse
@@ -95,14 +95,6 @@ def main() -> None:
         raise SystemExit('Install project dependencies first; see README.md')
     if not args.skip_db and not hardware_mode:
         subprocess.run([sys.executable, str(ROOT / 'scripts/manage_postgres.py'), 'start'], check=True)
-    if hardware_mode:
-        # First-boot convenience: bring the robot-side components up once so a
-        # fresh boot ends with all four lights green. Everything after this is
-        # manual by design - mid-session breaks are reconnected by the operator
-        # through the link panel buttons, never automatically.
-        subprocess.Popen([str(ROOT / 'scripts/h2_field_start.sh'), '--robot-only'], cwd=ROOT,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
     environment = os.environ.copy()
     environment['PATH'] = os.pathsep.join((str(PYTHON.parent), environment.get('PATH', os.defpath)))
     environment['H2_HARDWARE_TELEOP'] = '1' if hardware_mode else '0'

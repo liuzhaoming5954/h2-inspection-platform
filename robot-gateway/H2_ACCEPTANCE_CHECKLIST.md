@@ -1,6 +1,6 @@
 # H2 真机联调验收清单
 
-启动顺序为 **PC2 温湿度代理 → PC3 只读探测和网关 → 上位机两条 SSH 转发和应用 → 就绪检查**。就绪后依次验收温湿度、遥控方向和停步、通道隔离及两段断链。地图、真机位姿和相机画面待接入。[三端部署说明](H2_COMMISSIONING.md) · [设计方案](H2_DESIGN.md)
+启动顺序为 **PC2 温湿度代理 → PC3 只读探测和网关 → 上位机两条 SSH 转发和应用 → 就绪检查**。就绪后依次验收温湿度、遥控方向和停步、通道隔离及两段断链。真机位姿来自 PC3 里程计，地图和相机画面待接入。[三端部署说明](H2_COMMISSIONING.md) · [设计方案](H2_DESIGN.md)
 
 ## 三端更新与开测条件
 
@@ -81,7 +81,7 @@ ssh -N -T -S none \
   -L 127.0.0.1:15052:127.0.0.1:50052 pc3-user@pc3-host
 ```
 
-- [ ] **应用终端** 若旧服务在运行，先发出停止请求，再查状态直到返回 `stopped`。
+- [ ] **应用终端** 先确认两条 SSH 转发均已建立。任一路失败时保留原上位机服务并检查对应端口。两条均通过后，若旧服务还在运行，发出停止请求并查状态直到返回 `stopped`。
 
 ```bash
 .venv/bin/python scripts/dev.py stop
@@ -115,7 +115,7 @@ curl --fail --silent --show-error http://127.0.0.1:8000/api/robot \
 .venv/bin/python scripts/h2_field_check.py
 ```
 
-已完成三端部署的现场可在上位机项目根目录运行 `scripts/h2_field_start.sh`，用其启动输出和本节的判据复核。脚本会复用已运行的代理和网关。升级时先替换 PC2 的 `~/sensor_agent.py`，停止旧的 PC2、PC3 进程，再执行脚本。停止上位机应用及两条转发可用 `scripts/h2_field_stop.sh`。PC2 和 PC3 的服务按各自部署方式停止。[现场启动说明](H2_COMMISSIONING.md#1-核对部署版本)
+已完成三端部署的现场可在上位机项目根目录运行 `scripts/h2_field_start.sh`，用其启动输出和本节的判据复核。脚本会复用已运行的代理和网关，在两条 SSH 转发均通过独立进程和只读网关查询检查后才停启上位机。升级时先替换 PC2 的 `~/sensor_agent.py`，停止旧的 PC2、PC3 进程，再执行脚本。停止上位机应用及两条转发可用 `scripts/h2_field_stop.sh`。PC2 和 PC3 的服务按各自部署方式停止。[现场启动说明](H2_COMMISSIONING.md#1-核对部署版本)
 
 若应用未启动，查看上位机 `.runtime/logs/api.log` 和 `.runtime/logs/frontend.log`。若页面未连接或 `/api/robot` 返回 `503`，先查看状态 SSH 终端及 PC3 网关日志。若能读取状态但不能申请控制权，检查遥控 SSH 终端。运控未就绪时回到 PC3 做只读探测。温湿度缺失时核对 PC2 的响应、采样年龄和网关剩余有效时间。
 

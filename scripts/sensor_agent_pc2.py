@@ -1,11 +1,11 @@
-"""PC2 sensor agent: poll the RS-485 sensor and serve readings as local HTTP JSON.
+"""PC2 传感器代理，轮询 RS-485 传感器并通过本地 HTTP 接口返回 JSON 读数。
 
-Deployed on PC2 (system python3 + pyserial), reads the TASI transmitter on
-/dev/ttyACM0 (interface-10 RS-485; sensor A/B are crossed against the robot
-bus convention). Serves GET /environment on the robot's external dev subnet
-only. Read failures serve the last good sample until it expires, then report
-unavailable. Ported from the field-proven read_sensor.py Modbus logic
-(Modbus-RTU 9600 8N1, slave 0x01, humidity 0x0000 / temperature 0x0001, /10).
+部署在 PC2 上，使用系统 python3 和 pyserial 从 /dev/ttyACM0 读取 TASI 变送器。
+该设备对应 10 号接口的 RS-485，传感器 A/B 线与机器人总线约定交叉连接。
+GET /environment 仅在机器人外部开发网段提供服务。
+读取失败时仍返回上一次有效采样，直到该采样过期，此后报告不可用。
+Modbus 逻辑移植自经过现场验证的 read_sensor.py。
+使用 Modbus-RTU 9600 8N1，从站地址 0x01，湿度寄存器 0x0000，温度寄存器 0x0001，读数除以 10。
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def read_temp_humi(ser: serial.Serial, addr: int = 1) -> tuple[float, float]:
 
 
 class Latest:
-    """Last good sample guarded by a lock; readers never block on the bus."""
+    """用锁保护最近一次有效采样，使读取方无需等待总线通信。"""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -116,7 +116,7 @@ def poll_loop() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+    def do_GET(self) -> None:  # noqa: N802 - 沿用标准库的方法命名
         if self.path != "/environment":
             self.send_error(404)
             return
@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *args: object) -> None:
-        pass  # keep nohup logs quiet; failures surface via consecutive_failures
+        pass  # 省略 nohup 中的常规请求日志，通过 consecutive_failures 反映读取失败。
 
 
 if __name__ == "__main__":

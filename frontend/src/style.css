@@ -53,7 +53,7 @@ button:focus-visible,a:focus-visible {
   flex-direction:column;
   padding:28px 16px 24px;
   z-index:4;
-  overflow-y:auto; /* the docked teleop panel can exceed short viewports */
+  overflow-y:auto; /* 视口较矮时允许滚动查看完整的遥控面板。 */
 }
 .brand {
   display:flex;
@@ -1452,7 +1452,7 @@ h2 {
   }
 }
 
-/* Keep the scene beside manual control, and keep task evidence together. */
+/* 三维场景与手动遥控并排，巡检证据集中显示。 */
 .workspace-grid .scene-panel {
   display: flex;
   flex-direction: column;

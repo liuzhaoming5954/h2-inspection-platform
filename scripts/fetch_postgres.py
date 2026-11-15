@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fetch official PostgreSQL 17 Ubuntu packages into a project-local directory.
+"""将 PostgreSQL 17 的 Ubuntu 官方软件包下载到项目本地目录。
 
-No apt sources or system installation are changed. SHA256 is verified against
-the package index fetched over HTTPS. Run as the regular desktop user.
+保留现有 apt 软件源和系统安装。根据通过 HTTPS 获取的软件包索引校验 SHA256。
+以普通桌面用户身份运行。
 """
 from __future__ import annotations
 

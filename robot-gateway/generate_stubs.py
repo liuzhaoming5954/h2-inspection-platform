@@ -1,4 +1,4 @@
-"""Generate checked-in protobuf stubs using this environment's grpcio-tools."""
+"""使用当前环境的 grpcio-tools 生成纳入版本管理的 Protobuf 桩代码。"""
 
 from pathlib import Path
 

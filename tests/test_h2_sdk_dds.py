@@ -1,4 +1,4 @@
-"""Opt-in WebSocket, gRPC and Unitree DDS integration with a loopback controller."""
+"""显式启用后，使用回环控制器验证 WebSocket、gRPC 和宇树 DDS 的集成。"""
 
 import json
 import os
@@ -26,8 +26,8 @@ def test_h2_hardware_path_over_loopback_dds(tmp_path, monkeypatch):
     )
     from unitree_sdk2py.rpc.server import Server
 
-    # Unitree's factory silently reuses its first domain and interface. Fail if
-    # another test initialized it before this loopback configuration.
+    # 宇树的工厂会直接复用首次配置的域和网卡。
+    # 若其他测试在此处配置回环之前已将其初始化，则使本测试失败。
     assert not channel.ChannelFactory._ChannelFactory__initialized
     monkeypatch.setattr(channel, "ChannelConfigHasInterface", """
         <CycloneDDS>

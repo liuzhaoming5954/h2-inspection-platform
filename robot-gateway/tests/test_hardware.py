@@ -59,7 +59,7 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     token = gateway.teleop_acquire()["token"]
     assert gateway.teleop_acquire()["code"] == "teleop_busy"
     assert send(gateway, token, 1, "forward", ttl=-1)["code"] == "expired"
-    # A deadline beyond the gateway's command window is invalid.
+    # 超出网关指令时间窗口的截止时间无效。
     assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert loco.commands.empty()
     assert send(gateway, token, 3, "forward")["accepted"]
@@ -68,9 +68,9 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     assert 0 < duration <= 0.25
     assert send(gateway, token, 3, "backward")["code"] == "stale_sequence"
     assert send(gateway, token, 4, "heartbeat")["accepted"]
-    # Motion-frame expiry halts motion (heartbeat cannot extend a frame)…
+    # 运动指令帧过期时停步，心跳无法延长帧的有效期。
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
-    # …but no longer revokes the lease: a fresh motion command resumes.
+    # 租约仍然有效，新的运动指令可恢复运动。
     assert send(gateway, token, 5, "forward")["accepted"]
     assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
     assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
@@ -117,7 +117,7 @@ def test_an_ordered_stop_from_the_owner_needs_no_valid_deadline(hardware):
     token = gateway.teleop_acquire()["token"]
     assert send(gateway, token, 1, "forward")["accepted"]
     assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
-    # Stop may always use an expired deadline, subject to owner and order.
+    # 停步允许使用已过期的截止时间，仍需验证租约归属和指令顺序。
     assert send(gateway, token, 2, "forward", ttl=3000)["code"] == "invalid_expiry"
     assert send(gateway, "wrong-token", 2, "stop", ttl=1200)["code"] == "invalid_token"
     assert send(gateway, token, 1, "stop", ttl=1200)["code"] == "stale_sequence"
@@ -164,8 +164,8 @@ def test_queued_stop_then_direction_outrank_status(hardware, monkeypatch, direct
 
     monkeypatch.setattr(lock._changed, "wait_for", notify_waiting)
     with ThreadPoolExecutor(max_workers=3) as executor:
-        # Simulate an already running SDK operation, then queue status,
-        # direction and stop in the opposite order from their priorities.
+        # 模拟 SDK 操作正在执行，再按与实际优先级相反的顺序
+        # 将状态查询、方向指令和停步请求入队。
         with lock.hold(_SDKLock.SAFETY):
             status = submit_waiting(executor, gateway.get_state)
             direction = submit_waiting(executor, send, gateway, token, direction_sequence, "forward")

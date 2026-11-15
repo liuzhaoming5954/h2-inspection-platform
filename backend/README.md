@@ -21,6 +21,8 @@ API契约见 `/docs`。任务创建以`request_id`去重，相同键对应不同
 
 `GET /api/health` 返回模式标记 `hardware_teleop`、`simulated` 及网关状态。`GET /api/robot` 和只读 WebSocket `/api/ws` 提供机器人状态。模拟模式返回模拟位姿和巡检进度，真机模式读取高层运动状态、控制权状态、最近指令应答，以及可用的电量和环境遥测。真机模式要求连接真机网关，拒绝下发或停止巡检任务，也不会回放待派发的巡检任务。
 
+现场链路管理接口 `/api/field/*` 只在真机模式注册。模拟模式请求这些路径时返回 404。真机重连在处理已有转发前检查 SSH 凭据，并为状态和遥控分别建立独立 SSH 连接。
+
 `/api/robot` 的真机环境字段包括 `temperature_c`（℃）、`humidity_percent`（%RH）、`environment_captured_at`（PC2 原始采集时刻，Unix 秒）、`environment_sample_id`（样本标识）和 `environment_remaining_ms`（样本剩余有效毫秒数）。PC2 用单调时钟计算采样年龄，网关和页面据此维持从采样起最多 8 秒的有效期，重复读到同一采样不会刷新期限。`received_at` 是后端收到网关状态后记录的时间。网关没有传回的遥测字段在 API 中为 `null`。旧网关缺少样本剩余有效时间时，页面显示「等待传感器数据」。现场地图和相机画面目前仅有前端占位，状态 API 未接入相应数据。
 
 模拟和真机遥控均使用 `/api/teleop/ws`。入口仅接受本地 Vite 页面（`127.0.0.1` 或 `localhost` 的 5173、4173 端口）及本地代理，真机模式另要求 WebSocket 对端为回环地址。后端核对机器人模式，真机模式还要求高层运动服务就绪。网关授予独占控制权，令牌保留在后端。收到 `type: "lease"` 且 `accepted: true` 后，浏览器才能发送 `{action, sequence, sent_at_ms}`，其中序号严格递增，发送时间为 `Date.now()`。支持前进、后退、左右转、停步、心跳和释放。

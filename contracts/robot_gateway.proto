@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package h2.gateway.v1;
 
-// Local simulator or H2 high-level hardware teleoperation gateway.
+// 本机模拟器或 H2 真机高层遥控的网关服务。
 service RobotGateway {
   rpc GetState(Empty) returns (RobotState);
   rpc StartTask(StartTaskRequest) returns (CommandReply);
@@ -49,7 +49,7 @@ message CommandReply {
 message Pose {
   double x = 1;
   double y = 2;
-  // Radians in the simulation plane: +x at zero, positive towards +y.
+  // 模拟平面上的角度以弧度表示，沿 +x 为零，朝 +y 转动为正。
   double yaw = 3;
 }
 
@@ -59,7 +59,7 @@ message RobotState {
   string task_id = 3;
   double progress = 4;
   int64 sequence = 5;
-  // Present when the engine has a live battery reading (hardware bmsstate).
+  // 引擎收到实时电量读数时才提供该字段，真机数据来自 bmsstate。
   optional double battery_percent = 6;
   Pose pose = 7;
   bool simulated = 8;
@@ -71,10 +71,10 @@ message RobotState {
   bool teleop_ready = 14;
   optional int32 fsm_id = 15;
   optional int32 fsm_mode = 16;
-  // Ambient environment from the PC2 RS-485 sensor agent; absent when stale.
+  // 环境读数来自 PC2 的 RS-485 传感器代理，过期后省略。
   optional double temperature_c = 17;
   optional double humidity_percent = 18;
-  // Original PC2 sample time in Unix seconds, for display and diagnostics.
+  // PC2 原始采样时间，以 Unix 秒表示，用于显示和诊断。
   optional double environment_captured_at = 19;
   optional uint32 environment_remaining_ms = 20;
   optional string environment_sample_id = 21;
@@ -84,8 +84,8 @@ message TeleopCommandRequest {
   string token = 1;
   int64 sequence = 2;
   string action = 3;
-  int64 expires_at_ms = 4;  // Simulator only (Unix time on the workstation).
-  optional int64 gateway_deadline_ms = 5;  // Hardware only (PC3 monotonic clock).
+  int64 expires_at_ms = 4;  // 仅用于模拟器，采用上位机的 Unix 时间。
+  optional int64 gateway_deadline_ms = 5;  // 仅用于真机，采用 PC3 的单调时钟。
 }
 
 message TeleopReleaseRequest { string token = 1; }

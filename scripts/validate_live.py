@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real HTTP -> PostgreSQL -> gRPC simulator -> report chain."""
+"""用实际运行的 HTTP 服务、PostgreSQL 和 gRPC 模拟器验证报告生成链路。"""
 from __future__ import annotations
 
 import argparse
@@ -80,7 +80,7 @@ def main() -> None:
     Image.open(BytesIO(image_data)).verify()
     (OUT / 'sample-evidence.png').write_bytes(image_data)
 
-    # A longer task makes stop confirmation observable before natural completion.
+    # 使用耗时较长的任务，便于在任务自然完成前验证停止操作的回执。
     stop_payload = {'name': '技术验证：直接停止', 'request_id': str(uuid4()),
                     'points': [{**points[i % 3], 'id': f'stop-{i}'} for i in range(10)]}
     stopping = request('/api/tasks', stop_payload)

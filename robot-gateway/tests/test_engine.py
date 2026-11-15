@@ -1,4 +1,4 @@
-"""Checks focus on command replay, stale motion, stop, and crash recovery."""
+"""验证指令重放、运动指令超时、停步和崩溃恢复。"""
 
 import threading
 import time
@@ -32,7 +32,7 @@ def test_replayed_command_is_persistent_and_never_restarts(tmp_path):
         assert result["samples"][0]["image_png"].startswith(b"\x89PNG\r\n\x1a\n")
         assert result["samples"][0]["simulated"] is True
     with SimulatorEngine(db) as restarted:
-        # An old command replay returns the original reply, even after its deadline.
+        # 重放旧指令时，即使原指令已过期，也返回原回执。
         assert restarted.start_task("t1", "start-1", now_ms() - 1, POINTS) == reply
         assert restarted.get_state()["start_count"] == 1
         assert restarted.get_task("t1")["status"] == "completed"

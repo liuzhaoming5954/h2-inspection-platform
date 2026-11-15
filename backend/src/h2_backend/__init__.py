@@ -1,1 +1,1 @@
-"""Technical validation API for the H2 inspection platform."""
+"""H2 巡检平台的技术验证 API。"""

@@ -1,4 +1,4 @@
-"""Pose telemetry: odometry watcher degradation and wire mapping."""
+"""验证位姿遥测在里程计缺失时的降级和协议字段映射。"""
 
 import time
 
@@ -24,7 +24,7 @@ def test_gateway_state_carries_pose_until_it_stales():
         wait_for(gateway, lambda state: state["teleop_ready"])
         assert gateway.get_state()["pose"] == {"x": 1.25, "y": -3.5, "yaw": 0.42}
 
-        odom.value = None  # odometry topic stale or absent
+        odom.value = None  # 里程计话题读数过期或缺失
         assert "pose" not in gateway.get_state()
     finally:
         gateway.close()

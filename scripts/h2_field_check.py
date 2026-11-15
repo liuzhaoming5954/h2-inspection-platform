@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Field self-check for the H2 teleop chain: acquire, heartbeat, release.
+"""在现场自检 H2 遥控链路的控制权申请、心跳和释放。
 
-Checks hardware mode and readiness, then exercises the WebSocket and the PC3
-gateway's lease path without sending any motion command. Run on the workstation.
+先核对真机模式和就绪状态，再验证 WebSocket 和 PC3 网关的租约流程。
+在上位机运行，自检期间不发送运动指令。
 
-Usage: .venv/bin/python scripts/h2_field_check.py
+用法：.venv/bin/python scripts/h2_field_check.py
 """
 
 from __future__ import annotations

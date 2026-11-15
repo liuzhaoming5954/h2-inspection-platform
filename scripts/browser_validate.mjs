@@ -1,4 +1,4 @@
-// Real browser verification against the locally running validation stack.
+// 使用真实浏览器验证本地运行的服务。
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -20,7 +20,11 @@ const browser = await playwright.chromium.launch({
 const context = await browser.newContext({ viewport: { width: 1600, height: 1100 }, locale: 'zh-CN' })
 const page = await context.newPage()
 const errors = []
+const fieldRequests = []
 page.on('pageerror', error => errors.push(error.message))
+page.on('request', request => {
+  if (new URL(request.url()).pathname.startsWith('/api/field/')) fieldRequests.push(request.url())
+})
 try {
   await page.goto(process.env.H2_FRONTEND_URL ?? 'http://127.0.0.1:5173', { waitUntil: 'networkidle' })
   await page.getByRole('heading', { name: '巡检技术验证台', exact: true }).waitFor()
@@ -50,10 +54,11 @@ try {
   await page.reload({ waitUntil: 'networkidle' })
   await page.getByText('浏览器验证：三处采样和照片已核对，数据均为合成。', { exact: true }).waitFor()
   assert.equal(await page.locator('.data-table tbody tr').count(), 3, 'Reload should recover persisted samples')
+  assert.deepEqual(fieldRequests, [], 'Simulation must not request field-link endpoints')
   assert.deepEqual(errors, [], 'No uncaught browser errors')
   const result = { passed: true, mode: 'real browser against simulator-backed local services', task_id: created.id,
     checks: { page_loaded: true, task_submitted: true, three_samples_shown: true, review_saved: true,
-      report_links_shown: true, webgl_and_chart_canvases_present: true, reload_retains_data: true },
+      report_links_shown: true, webgl_and_chart_canvases_present: true, reload_retains_data: true, no_field_requests: true },
     page_errors: errors, screenshot: 'dashboard.png' }
   await fs.writeFile(path.join(out, 'browser-result.json'), JSON.stringify(result, null, 2))
   console.log(JSON.stringify(result, null, 2))

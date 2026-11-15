@@ -1,4 +1,4 @@
-"""Durable, deterministic robot simulator with no hardware dependencies."""
+"""支持持久化、行为确定且无硬件依赖的机器人模拟器。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def now_ms() -> int:
 
 
 def simulated_png(index: int) -> bytes:
-    """Draw a synthetic cabinet and a visible SIM mark using only stdlib."""
+    """仅用标准库绘制合成机柜图像与醒目的 SIM 标记。"""
     width, height = 320, 200
     pixels = [bytearray([18, 28, 45] * width) for _ in range(height)]
 
@@ -42,7 +42,7 @@ def simulated_png(index: int) -> bytes:
         rect(85, y + 5, 205, y + 8, (105, 127, 144))
         rect(85, y + 12, 195, y + 15, (105, 127, 144))
         rect(225, y + 6, 235, y + 15, (52, 211, 153))
-    # This source is deliberately synthetic and cannot be mistaken for evidence.
+    # 通过 SIM 标记表明图像为模拟生成，避免误作现场证据。
     rect(0, 0, 58, 21, (177, 52, 54))
     glyphs = [
         ["11111", "10000", "10000", "11111", "00001", "00001", "11111"],
@@ -71,7 +71,7 @@ def simulated_png(index: int) -> bytes:
 
 
 class SimulatorEngine:
-    """One simulated robot; its SQLite file is a gateway-local journal."""
+    """单台模拟机器人，使用网关本地 SQLite 文件记录操作。"""
 
     def __init__(self, db_path: str | Path, step_delay: float = 0.8):
         self.db_path = str(db_path)

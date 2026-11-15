@@ -48,7 +48,7 @@ export interface RobotState {
   start_count?: number
   x?: number
   y?: number
-  pose?: { x?: number; y?: number; yaw?: number }
+  pose?: { x: number; y: number; yaw: number } | null
   position?: { x?: number; y?: number; yaw?: number }
   teleop_active?: boolean
   teleop_ready?: boolean

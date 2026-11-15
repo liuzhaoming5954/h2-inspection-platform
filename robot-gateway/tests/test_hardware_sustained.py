@@ -1,4 +1,4 @@
-"""Sustained-motion regressions: FSM starvation and late SDK acknowledgements."""
+"""持续运动回归测试，覆盖 FSM 轮询得不到执行和 SDK 回执迟到。"""
 
 import time
 
@@ -8,7 +8,7 @@ from test_hardware import RecordingLoco, wait_for
 
 
 class SlowAckLoco(RecordingLoco):
-    """ velocity() takes longer than a frame's validity, like a loaded DDS round trip."""
+    """模拟 DDS 繁忙时的往返延迟，velocity() 耗时超过指令帧有效期。"""
 
     def __init__(self, delay: float = 0.30):
         super().__init__()
@@ -20,9 +20,9 @@ class SlowAckLoco(RecordingLoco):
 
 
 def test_sustained_frames_keep_the_lease_alive():
-    # Frames every 200 ms with 250 ms validity used to starve the FSM poll:
-    # the state went stale, _ready() failed, and the lease was revoked
-    # mid-motion. The watch loop must keep polling while frames flow.
+    # 曾经每 200 ms 发送一帧、单帧有效期 250 ms 时，FSM 轮询无法执行，
+    # 导致状态过期、_ready() 检查失败，并在运动中撤销租约。
+    # 持续接收运动帧时，监测循环仍需轮询 FSM。
     gateway = H2HardwareGateway(RecordingLoco())
     try:
         wait_for(gateway, lambda state: state["teleop_ready"])
@@ -47,15 +47,15 @@ def test_late_sdk_acknowledgement_halts_motion_but_keeps_the_lease():
     try:
         wait_for(gateway, lambda state: state["teleop_ready"])
         token = gateway.teleop_acquire()["token"]
-        # remaining ≈ 350 ms -> duration 250 ms; the RPC sleeps 300 ms, so the
-        # acknowledgement arrives after the frame's own deadline.
+        # 剩余时间约 350 ms，实际帧时长为 250 ms。
+        # RPC 等待 300 ms，回执到达时该帧已过期。
         reply = gateway.teleop_command(token, 1, "forward",
                                        time.monotonic_ns() // 1_000_000 + 350)
         assert reply["accepted"] and reply["code"] == "stopped", reply
-        # The late frame executed, then an ordered zero velocity follows it…
+        # 迟到的指令帧执行后，按顺序补发零速度指令。
         assert loco.commands.get(timeout=1)[0] == (0.5, 0, 0)
         assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
-        # …and the lease survives: the next command goes straight through.
+        # 租约仍然有效，下一条指令可直接执行。
         reply = gateway.teleop_command(token, 2, "heartbeat",
                                        time.monotonic_ns() // 1_000_000 + 350)
         assert reply["accepted"] and reply["code"] == "renewed", reply

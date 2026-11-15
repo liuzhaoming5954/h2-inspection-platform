@@ -1,4 +1,4 @@
-"""High-level SDK2 control for a locally operated Unitree H2."""
+"""通过 SDK2 对本地操作的宇树 H2 进行高层控制。"""
 
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ LOG = logging.getLogger(__name__)
 
 
 def emit_event(fields: dict) -> None:
-    # Field-diagnosis events: one JSON object per line, stamped with this
-    # machine's monotonic clock, so frame continuity, SDK acknowledgement
-    # latency and every zero-velocity request can be measured offline
-    # without any cross-device clock sync. The server enables INFO logging
-    # for the h2_gateway package; unit tests read the same records.
+    # 现场诊断事件每行记录一个 JSON 对象，时间戳使用本机单调时钟。
+    # 因此可以离线分析指令帧连续性、SDK 回执延迟和每次零速度请求，
+    # 无需同步各设备的时钟。
+    # 服务端为 h2_gateway 包开启 INFO 级别日志，
+    # 单元测试读取相同的记录。
     fields["mono_ms"] = time.monotonic_ns() // 1_000_000
     LOG.info("h2_event %s", json.dumps(fields, sort_keys=True))
 MAIN_FSM = 601
@@ -43,12 +43,12 @@ MIN_VELOCITY_DURATION = 0.04
 MAX_HARDWARE_COMMAND_MS = 350
 ENVIRONMENT_SAMPLE_ID = re.compile(r"([0-9a-f]{32}):([1-9][0-9]{0,15})")
 
-# Field-verified trial limits (2026-11-15, motion bench on the real H2): the
-# built-in HybridWalk controller in FSM 601 only lifts its feet above a speed
-# threshold — at 0.15 m/s / 0.25 rad/s every accepted command produced balance
-# adjustments only (lean, in-place yaw), never a step. Walking starts between
-# 0.3 and 0.5 m/s; sustained stream and single commands were both verified at
-# the values below. The H2's built-in controller still owns gait and balance.
+# 2026-11-15 经 H2 真机运动测试验证的试验限值。FSM 601 下，
+# 内置 HybridWalk 控制器只在速度超过阈值后抬脚。
+# 在 0.15 m/s 和 0.25 rad/s 下，已接受的指令只会引起
+# 倾斜或原地偏航等平衡调整。起步速度介于 0.3 和 0.5 m/s 之间。
+# 下列数值经持续指令流和单条指令测试。
+# 步态和平衡仍由 H2 的内置控制器负责。
 VELOCITIES = {
     "forward": (0.5, 0.0, 0.0),
     "backward": (-0.5, 0.0, 0.0),
@@ -74,8 +74,8 @@ class UnitreeLoco:
         except ImportError as error:
             raise RuntimeError("Install the Unitree H2 Python SDK and CycloneDDS first; see README.md") from error
         try:
-            # The pinned SDK enables config tracing to /tmp/cdds.LOG.
-            # CycloneDDS 0.10.2 aborts in that trace on the Ubuntu 24.04 build.
+            # 固定版本的 SDK 会将配置跟踪信息写入 /tmp/cdds.LOG。
+            # Ubuntu 24.04 上的 CycloneDDS 0.10.2 构建会在写入跟踪信息时异常终止。
             original_config = channel.ChannelConfigHasInterface
             config = ElementTree.fromstring(original_config)
             for entry in config.findall("./Domain"):
@@ -105,7 +105,7 @@ class UnitreeLoco:
         return fsm_id, fsm_mode
 
     def velocity(self, vx: float, vy: float, omega: float, duration: float) -> None:
-        # The Python SDK's Move and StopMove convenience methods discard the RPC result.
+        # Python SDK 的 Move 和 StopMove 便捷方法会丢弃 RPC 返回结果。
         code = self._client.SetVelocity(vx, vy, omega, duration)
         if code != 0:
             raise RuntimeError(f"H2 SetVelocity failed (SDK code {code})")
@@ -120,10 +120,10 @@ class BatterySource(Protocol):
 
 
 class BmsWatcher:
-    """Subscribe the robot's low-frequency BMS topic on the live channel factory.
+    """通过已启用的通道工厂订阅机器人的低频 BMS 话题。
 
-    Must be constructed after ChannelFactoryInitialize (UnitreeLoco does it).
-    Stale or missing readings degrade to None; the field stays absent.
+    在 UnitreeLoco 调用 ChannelFactoryInitialize 后构造实例。
+    读数过期或缺失时返回 None，状态中省略该字段。
     """
 
     def __init__(self, topic: str = "rt/lf/bmsstate", *, fresh_seconds: float = 5.0):
@@ -132,7 +132,7 @@ class BmsWatcher:
 
         self._lock = threading.Lock()
         self._fresh_seconds = fresh_seconds
-        self._reading: tuple[float, float] | None = None  # (monotonic, soc percent)
+        self._reading: tuple[float, float] | None = None  # （单调时钟读数，soc 百分比）
         self._subscriber = ChannelSubscriber(topic, BmsState_)
         self._subscriber.Init(self._on_message, 1)
 
@@ -149,13 +149,13 @@ class BmsWatcher:
 
 
 class OdomWatcher:
-    """Subscribe the H2 odometry topic (rt/odommodestate, ~500 Hz) and keep the
-    latest pose for state polls.
+    """订阅 H2 里程计话题（rt/odommodestate，约 500 Hz），
+    保存最新位姿供状态轮询读取。
 
-    The documented low-frequency variant (rt/lf/odommodestate) is absent on
-    early firmware, so this uses the high-frequency topic and simply keeps the
-    most recent sample under a lock — the poll rate is ~1 Hz. World frame:
-    origin at power-on, x forward, y left (resets on reboot)."""
+    早期固件没有文档所述的低频话题（rt/lf/odommodestate），
+    因此订阅高频话题并用锁保护最新样本。状态轮询约为 1 Hz。
+    世界坐标系以开机位置为原点，x 轴向前，y 轴向左，
+    重启会重置原点。"""
 
     def __init__(self, topic: str = "rt/odommodestate", *, fresh_seconds: float = 2.0):
         from unitree_sdk2py.core.channel import ChannelSubscriber
@@ -163,7 +163,7 @@ class OdomWatcher:
 
         self._lock = threading.Lock()
         self._fresh_seconds = fresh_seconds
-        self._reading: tuple[float, dict] | None = None  # (monotonic, pose)
+        self._reading: tuple[float, dict] | None = None  # （单调时钟读数，位姿）
         self._subscriber = ChannelSubscriber(topic, SportModeState_)
         self._subscriber.Init(self._on_message, 1)
 
@@ -184,10 +184,10 @@ class OdomWatcher:
 
 
 class AgentEnvironment:
-    """Poll the PC2 RS-485 sensor agent; serve the last fresh reading.
+    """轮询 PC2 的 RS-485 传感器代理，提供最新的有效读数。
 
-    Read failures and staleness degrade to None (fields simply absent from
-    state); telemetry never blocks or affects the motion paths.
+    读取失败或读数过期时返回 None，状态中省略相应字段。
+    遥测独立于运动控制路径。
     """
 
     def __init__(self, url: str, *, interval: float = 2.0, fresh_seconds: float = 8.0,
@@ -198,7 +198,7 @@ class AgentEnvironment:
         self._fetch = fetch or self._http_fetch
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._reading: tuple[float, dict] | None = None  # (monotonic expiry, PC2 sample)
+        self._reading: tuple[float, dict] | None = None  # （单调时钟截止时间，PC2 样本）
         self._latest_samples: dict[str, int] = {}
         self._current_instance: str | None = None
 
@@ -278,7 +278,7 @@ class AgentEnvironment:
 
 
 class _SDKLock:
-    """Serialize SDK access, serving older waiters first within a priority."""
+    """串行访问 SDK，同一优先级内先处理较早入队的请求。"""
 
     SAFETY = 0
     CONTROL = 1
@@ -315,7 +315,7 @@ class _SDKLock:
 
 
 class H2HardwareGateway:
-    """One serialized SDK writer and one non-persistent control lease."""
+    """串行执行 SDK 写入，控制租约仅保存在内存中。"""
 
     def __init__(self, loco: Loco, environment: EnvironmentSource | None = None,
                  battery: BatterySource | None = None, odom: "OdomWatcher | None" = None):
@@ -375,14 +375,14 @@ class H2HardwareGateway:
         elif self._token and not self._ready(now):
             self._revoke("not_ready")
         elif self._motion_until and now >= self._motion_until:
-            # A motion frame's validity lapsed without a successor frame.
-            # Halt motion immediately (per-frame dead-man) but keep the
-            # lease: the 2 s heartbeat deadline owns revocation. Coupling
-            # the two killed healthy sessions whenever the frontend's next
-            # frame crossed the tunnel after 250 ms.
+            # 运动指令帧已过期，后续帧尚未到达。
+            # 按帧超时立即停步，租约由 2 秒心跳期限独立管理。
+            # 把两种期限联动会使正常会话被提前撤销。
+            # 例如，前端的下一帧经隧道传输，
+            # 超过 250 ms 才到达时便会触发这种情况。
             self._motion_until = 0.0
             if self._motion in DIRECTIONS:
-                self._stop("frame_expired")  # failure latches stop_fault and revokes via _ready
+                self._stop("frame_expired")  # 失败时锁存 stop_fault，随后由 _ready 判定撤销租约。
 
     def _watch(self) -> None:
         next_poll = 0.0
@@ -394,9 +394,9 @@ class H2HardwareGateway:
                 self._expire(now)
                 if now < next_poll:
                     continue
-                # Let ordinary polling yield to queued control. Once the
-                # state approaches its freshness limit, take a FIFO turn
-                # alongside directions so continued motion cannot starve it.
+                # 普通状态轮询给队列中的控制指令让行。
+                # 状态接近过期时，与方向指令按先进先出顺序排队，
+                # 防止持续运动导致轮询一直得不到执行。
                 refresh_due = now - self._state_at >= STATE_MAX_AGE / 2
                 if (not refresh_due and self._motion_until
                         and self._motion_until - now <= 2 * SDK_TIMEOUT):
@@ -448,8 +448,8 @@ class H2HardwareGateway:
 
         if not include_telemetry:
             return state
-        # These caches use their own locks. Release the motion lock before
-        # reading them so a state request cannot hold up a stop or direction.
+        # 这些缓存各自加锁。读取前先释放运动锁，
+        # 避免状态请求拖延停步或方向指令。
         if self._environment is not None:
             reading = self._environment.sample()
             if reading is not None:
@@ -505,7 +505,7 @@ class H2HardwareGateway:
                 return self._reject(sequence, action, "invalid_action", "unsupported H2 teleop action")
             if sequence <= self._sequence:
                 return self._reject(sequence, action, "stale_sequence", "teleop sequence must strictly increase")
-            # A stop from the current lease remains valid even when delayed.
+            # 当前租约内的停步指令即使延迟到达仍然有效。
             if action != "stop":
                 if is_active is not None and not is_active():
                     return self._reject(sequence, action, "expired",
@@ -529,7 +529,7 @@ class H2HardwareGateway:
                 return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
 
             duration = min(remaining_ms / 1000, MAX_VELOCITY_DURATION)
-            # Once sent, an RPC timeout cannot distinguish a lost response from lost delivery.
+            # RPC 发出后若超时，无法区分请求未送达和回执丢失。
             self._stop_needed = True
             self._motion_until = min(time.monotonic() + duration, gateway_deadline_ms / 1000)
             frame = {"event": "teleop_frame", "seq": sequence, "action": action,
@@ -545,8 +545,8 @@ class H2HardwareGateway:
                 return teleop_reply(False, "sdk_rejected", "H2 velocity request was not acknowledged")
             frame["sdk_ms"] = round((time.monotonic_ns() - sent_ns) / 1e6, 1)
             if time.monotonic() >= self._motion_until:
-                # The SDK acknowledged after this frame's window. Send zero
-                # while this command still owns the lock and keep the lease.
+                # SDK 回执在该帧有效期结束后到达。
+                # 趁当前指令仍持有锁时发送零速度指令，并保留租约。
                 if not self._stop("late_frame"):
                     return teleop_reply(False, "stop_unconfirmed", "H2 stop was not acknowledged")
                 emit_event({**frame, "result": "late_ack_zeroed"})

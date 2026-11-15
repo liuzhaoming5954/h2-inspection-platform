@@ -1,10 +1,10 @@
-"""Field-link management: manual probes and SSH actions for the teleop chain.
+"""现场遥控链路管理，提供手动探测和 SSH 操作。
 
-The workstation owns three removable links: the PC2 sensor agent, the PC3
-gateway process, and the two SSH forwards that carry them here. Nothing in
-this module runs automatically - the UI exposes buttons and a human clicks
-them. Every action is idempotent (already-running components are reported,
-not restarted) and never sends motion commands.
+上位机管理三个可独立恢复的部分，分别是 PC2 传感器代理、
+PC3 网关进程和两条 SSH 转发通道。
+本模块的现场操作由操作员点击界面按钮触发。
+每项操作都是幂等的，已运行的组件会直接返回状态。
+这些操作不发送运动指令。
 """
 
 from __future__ import annotations
@@ -39,8 +39,8 @@ def _password() -> str:
 
 
 def _ssh(host: str, command: str, timeout: float = 15) -> str:
-    """Run one SSH command; a timeout does not mean failure (nohup starts can
-    hang the channel after the process is up), callers verify by probing."""
+    """执行一次 SSH 命令。通过 nohup 启动的进程就绪后，SSH 通道仍可能阻塞，
+    调用方通过探测确认结果。"""
     result = subprocess.run(
         ["sshpass", "-p", _password(), "ssh", "-n", "-o", "ConnectTimeout=5",
          "-o", "StrictHostKeyChecking=accept-new", f"unitree@{host}", command],
@@ -52,7 +52,7 @@ def _ssh(host: str, command: str, timeout: float = 15) -> str:
 
 
 def _ssh_best_effort(host: str, command: str, timeout: float = 15) -> None:
-    """Start-style command: tolerate a hung channel, the probe decides."""
+    """执行启动命令，允许 SSH 通道阻塞，以后续探测结果为准。"""
     try:
         _ssh(host, command, timeout=timeout)
     except (FieldError, subprocess.TimeoutExpired):
@@ -79,9 +79,9 @@ def forwards_status() -> dict[str, bool]:
 
 
 def status(gateway_connected: bool) -> dict:
-    """Link snapshot for the UI. The PC3 gateway binds to PC3's loopback, so
-    from here it is only observable through both forwards plus the backend's
-    own gateway connection."""
+    """提供界面所需的链路状态。PC3 网关监听 PC3 的回环地址，
+    上位机通过两条转发的状态以及后端自身的网关连接
+    判断网关是否可达。"""
     forwards = forwards_status()
     return {
         "pc2_agent": probe_pc2(),
@@ -91,14 +91,15 @@ def status(gateway_connected: bool) -> dict:
 
 
 def reconnect_forwards() -> dict:
-    """Kill half-dead forward listeners and re-establish both tunnels."""
-    # Matches only the ssh command lines of the two forwards, not this process.
+    """终止异常的转发监听进程并重建两条隧道。"""
+    password = _password()
+    # 匹配范围仅限两条转发的 ssh 命令行。
     subprocess.run(["pkill", "-f", r"127\.0\.0\.1:1505[12]:127\.0\.0\.1:5005[12]"],
                    capture_output=True)
     time.sleep(0.5)
     for port, target in ((15051, 50051), (15052, 50052)):
         subprocess.run(
-            ["sshpass", "-p", _password(), "ssh", "-N", "-T", "-f",
+            ["sshpass", "-p", password, "ssh", "-N", "-T", "-f", "-S", "none",
              "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=5",
              "-o", "ServerAliveCountMax=2",
              "-L", f"127.0.0.1:{port}:127.0.0.1:{target}", f"unitree@{PC3}"],

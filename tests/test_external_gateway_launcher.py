@@ -1,4 +1,4 @@
-"""Exercise the development launcher's mode selection without starting services."""
+"""在不启动服务的情况下验证开发启动器的模式选择。"""
 
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -33,10 +33,11 @@ def start(launcher, monkeypatch, *args):
     database_commands = []
     signal_handlers = {}
 
-    def spawn(command, *, env, stdout, **kwargs):
-        name = Path(stdout.name).stem
+    def spawn(command, **kwargs):
+        assert command[0] in {str(launcher.PYTHON), "/test/bin/node"}, command
+        name = Path(kwargs["stdout"].name).stem
         process = SimpleNamespace(pid=len(services) + 100, poll=lambda: None, wait=lambda timeout: None)
-        services[name] = (process, command, env)
+        services[name] = (process, command, kwargs["env"])
         return process
 
     def check_ready(url, process):
@@ -48,6 +49,7 @@ def start(launcher, monkeypatch, *args):
     monkeypatch.setattr(launcher, "subprocess", SimpleNamespace(
         Popen=spawn,
         STDOUT=-2,
+        DEVNULL=-3,
         run=lambda command, **kwargs: database_commands.append(command),
     ))
     monkeypatch.setattr(launcher, "wait_url", check_ready)

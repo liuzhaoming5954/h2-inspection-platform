@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute a deterministic synthetic ONNX model; not a business accuracy test."""
+"""运行结果可预知的合成 ONNX 模型，仅验证推理环境能否正常工作。"""
 from __future__ import annotations
 
 import json
@@ -20,8 +20,8 @@ OUT = ROOT / 'artifacts' / 'validation'
 def main() -> None:
     ort.disable_telemetry_events()
     OUT.mkdir(parents=True, exist_ok=True)
-    # A tiny affine graph with known results verifies the installed CPU provider
-    # and OpenCV -> NumPy -> ONNX Runtime preprocessing path.
+    # 用结果已知的小型仿射计算图验证已安装的 CPU 执行提供程序。
+    # 同时验证 OpenCV → NumPy → ONNX Runtime 的预处理链路。
     image = np.zeros((32, 48, 3), dtype=np.uint8)
     image[:, :, 1] = 128
     resized = cv2.resize(image, (16, 16), interpolation=cv2.INTER_AREA)

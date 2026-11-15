@@ -105,8 +105,8 @@ class InspectionService:
                     session.flush()
                     session.add(Outbox(id=str(uuid4()), task_id=task_id, expires_at_ms=int(time.time() * 1000) + self.settings.command_ttl_ms))
         except IntegrityError:
-            # Another request may have inserted the same request_id after our
-            # initial SELECT. Resolve to its committed task rather than 500.
+            # 首次 SELECT 后，并发请求可能已插入相同的 request_id。
+            # 用该请求已经提交的任务处理本次请求，避免返回 500。
             with self.sessions() as session:
                 existing = session.scalar(select(Task).where(Task.request_id == request_id))
                 if existing is None:
@@ -117,7 +117,7 @@ class InspectionService:
         try:
             self.dispatch(task_id)
         except IntegrityError:
-            # A concurrent synchronization has already persisted the same result.
+            # 并发同步已保存了相同的结果。
             pass
         return self.get_task(task_id)
 
@@ -132,8 +132,8 @@ class InspectionService:
     def dispatch(self, task_id: str) -> None:
         if self.settings.hardware_teleop:
             return
-        # The row lock serializes API/recovery retries. The gateway supplies the
-        # second idempotency boundary and persists command_id across restarts.
+        # 通过行锁串行处理 API 重试和恢复重试。
+        # 网关侧再次保证幂等，并持久化 command_id 以支持重启恢复。
         with self.sessions.begin() as session:
             outbox = session.scalar(select(Outbox).where(Outbox.task_id == task_id).with_for_update())
             if outbox is None or outbox.status != "pending":
@@ -252,9 +252,9 @@ class InspectionService:
     def stop_task(self, task_id: str) -> dict[str, Any]:
         if self.settings.hardware_teleop:
             raise ServiceError(409, "Inspection commands are disabled in H2 hardware teleoperation mode")
-        # Send the control request before consulting the business database.
-        # A database failure must not prevent an already-running simulated
-        # robot from receiving a stop request.
+        # 先发送控制请求，再查询业务数据库。
+        # 这样即使数据库发生故障，
+        # 已在运行的模拟机器人也能收到停步请求。
         try:
             reply = self.gateway.stop_task(task_id, str(uuid4()), int(time.time() * 1000) + 5000)
         except Exception as error:
@@ -275,8 +275,8 @@ class InspectionService:
                 task.status = "stopped"
                 task.reason = "Cancelled before dispatch."
             elif not reply.get("accepted"):
-                # Dispatch could have completed between the initial read and
-                # cancellation. Confirm a stop against that newly sent task.
+                # 从初次查询到取消之间，任务可能已下发。
+                # 对这项刚下发的任务再次确认停步。
                 retry_stop = True
         if retry_stop:
             try:
