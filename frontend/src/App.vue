@@ -288,6 +288,7 @@ onBeforeUnmount(() => {
       <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2 真机遥控' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'TELEOP CONSOLE' : 'INSPECTION CONSOLE' }}</span></span></a>
       <div class="workspace-label">验证工作区</div>
       <div class="nav-item active"><span class="nav-symbol">▦</span> {{ hardwareMode ? '真机遥控台' : '巡检验证台' }} <span class="nav-selected"></span></div>
+      <TeleopPanel v-if="modeKnown && hardwareMode" class="sidebar-teleop" :class="{ 'lease-held': teleopSession }" compact :robot="robot" :hardware="true" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
       <template v-if="modeKnown && !hardwareMode">
         <div class="sidebar-section">验证链路</div>
         <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
@@ -347,7 +348,7 @@ onBeforeUnmount(() => {
             <div class="monitor-placeholder map-placeholder">等待地图数据接入</div>
           </section>
           <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? '三维位姿 · 开机点坐标系（重启归零）' : '三维位姿与任务路线' }}</span></div><span class="view-badge">3D 实时视图</span></div><RoomScene :robot="robot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
-          <TeleopPanel :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
+          <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
               <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">机器人摄像头</span></div>
@@ -382,12 +383,17 @@ onBeforeUnmount(() => {
   grid-template-areas: 'map teleop' 'image teleop';
 }
 .hardware-map { grid-area: map; }
+/* With the teleop panel docked into the fixed sidebar, the 3D scene takes
+   its former right column: map + live pose + camera side by side. */
+.hardware-workspace > .scene-panel { grid-area: teleop; }
 .hardware-image { grid-area: image; }
 .hardware-workspace > .teleop-panel { grid-area: teleop; }
 @media (max-width: 800px) {
   .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image'; }
 }
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
+.sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+.sidebar-teleop.lease-held { outline: 2px solid #f0b64f; outline-offset: 2px; }
 .monitor-placeholder {
   display: grid;
   place-items: center;

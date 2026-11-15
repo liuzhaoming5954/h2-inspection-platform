@@ -15,7 +15,7 @@ interface Reply {
   sequence?: number
 }
 
-const props = defineProps<{ disabledReason: string; hardware: boolean; robot: RobotState | null; telemetryAvailable: boolean }>()
+const props = defineProps<{ compact?: boolean; disabledReason: string; hardware: boolean; robot: RobotState | null; telemetryAvailable: boolean }>()
 const emit = defineEmits<{ sessionActive: [active: boolean] }>()
 const pad = ref<HTMLDivElement>()
 const panel = ref<HTMLElement>()
@@ -311,11 +311,11 @@ function number(value: number | undefined, digits = 2) {
 </script>
 
 <template>
-  <section ref="panel" class="panel teleop-panel" data-testid="teleop-panel" aria-labelledby="teleop-heading" @keydown="pressKey" @focusout="leavePanel">
+  <section ref="panel" :class="['panel teleop-panel', { compact }]" data-testid="teleop-panel" aria-labelledby="teleop-heading" @keydown="pressKey" @focusout="leavePanel">
     <header class="panel-heading">
       <div>
         <h2 id="teleop-heading">手动遥控 <span class="teleop-mode-tag" :class="{ hardware }">{{ hardware ? '真机' : '模拟' }}</span></h2>
-        <p class="panel-caption">{{ hardware ? '使用高层运动服务控制 H2 真机' : '申请控制权后，可手动控制模拟机器人' }}</p>
+        <p v-if="!compact" class="panel-caption">{{ hardware ? '使用高层运动服务控制 H2 真机' : '申请控制权后，可手动控制模拟机器人' }}</p>
       </div>
       <span :class="['teleop-badge', { active }]" data-testid="teleop-session-status" role="status"><i></i>{{ sessionLabel }}</span>
     </header>
@@ -331,12 +331,12 @@ function number(value: number | undefined, digits = 2) {
         </button>
         <button class="teleop-stop" type="button" :disabled="!active" data-testid="teleop-stop" @click="stopMotion(true)"><span aria-hidden="true">■</span> 停步</button>
       </div>
-      <div v-if="hardware" class="teleop-telemetry">
+      <div v-if="hardware && !compact" class="teleop-telemetry">
         <div><small>最近指令应答</small><strong data-testid="teleop-motion">{{ robotMotion }}</strong></div>
         <div><small>状态机 ID</small><strong>{{ robotState?.fsm_id ?? '—' }}</strong></div>
         <div><small>运动模式</small><strong>{{ robotState?.fsm_mode ?? '—' }}</strong></div>
       </div>
-      <div v-else class="teleop-telemetry">
+      <div v-else-if="!compact" class="teleop-telemetry">
         <div><small>运动反馈</small><strong :class="{moving}" data-testid="teleop-motion">{{ robotMotion }}</strong></div>
         <div data-testid="teleop-position"><small>模拟位置 (m)</small><strong>{{ number(pose?.x) }}, {{ number(pose?.y) }}</strong></div>
         <div><small>朝向</small><strong>{{ number(pose?.yaw === undefined ? undefined : pose.yaw * 180 / Math.PI, 0) }}°</strong></div>
@@ -383,4 +383,10 @@ function number(value: number | undefined, digits = 2) {
 .teleop-telemetry .moving { color: #16888b; }
 .teleop-note { min-height: 31px; margin: 11px 0 0; color: #6f8492; font-size: 10px; line-height: 1.6; }
 .teleop-note.warning { color: #9a5a26; }
+/* Compact docked variant (fixed sidebar in hardware mode): the whole lease
+   chain stays available, the telemetry grid yields to the narrow column. */
+.teleop-panel.compact { align-self: stretch; border-top-width: 3px; }
+.teleop-panel.compact .teleop-body { padding: 10px 11px 9px; }
+.teleop-panel.compact .teleop-pad { margin: 10px auto 12px; }
+.teleop-panel.compact .teleop-note { min-height: 0; margin-top: 8px; }
 </style>

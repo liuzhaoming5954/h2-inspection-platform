@@ -53,6 +53,7 @@ button:focus-visible,a:focus-visible {
   flex-direction:column;
   padding:28px 16px 24px;
   z-index:4;
+  overflow-y:auto; /* the docked teleop panel can exceed short viewports */
 }
 .brand {
   display:flex;
