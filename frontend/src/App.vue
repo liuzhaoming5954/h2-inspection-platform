@@ -68,6 +68,22 @@ const samples = computed(() => selectedTask.value?.samples ?? [])
 const latestSample = computed(() => samples.value.at(-1))
 const reports = computed(() => selectedTask.value?.reports ?? [])
 const battery = computed(() => robot.value?.battery_percent ?? robot.value?.battery)
+// 3D view re-anchoring: the odometry frame cannot be reset on the robot, so the
+// scene keeps a captured anchor instead — the displayed pose is the live pose
+// minus the anchor, snapping the model to the scene centre on demand. The pose
+// card keeps showing the raw power-on frame (telemetry fact).
+const poseAnchor = ref<{ x: number; y: number; yaw: number } | null>(null)
+const displayRobot = computed(() => {
+  const current = robot.value
+  const anchor = poseAnchor.value
+  const pose = current?.pose
+  if (!current || !anchor || !pose) return current ?? null
+  return { ...current, pose: { x: pose.x - anchor.x, y: pose.y - anchor.y, yaw: pose.yaw - anchor.yaw } }
+})
+function resetViewAnchor() {
+  const pose = robot.value?.pose
+  if (pose) poseAnchor.value = { x: pose.x, y: pose.y, yaw: pose.yaw }
+}
 const stateNames: Record<string, string> = { idle: '待命', ready: '待命', pending_dispatch: '等待派发', accepted: '任务已接收', running: '巡检中', completed: '已完成', stopped: '已停止', interrupted: '执行中断', failed: '执行失败', rejected: '未接受', expired: '已过期', dispatch_expired: '派发已过期', stopping: '正在停止', offline: '离线', teleop: '手动遥控' }
 const hardwareStateNames: Record<string, string> = { ready: '可遥控', not_ready: '未就绪', offline: '离线', teleop: '遥控会话中', fault: '故障' }
 const hardwareState = computed(() => robotAvailable.value && robot.value?.simulated === false && robot.value.status
@@ -347,7 +363,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="monitor-placeholder map-placeholder">等待地图数据接入</div>
           </section>
-          <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? '三维位姿 · 开机点坐标系（重启归零）' : '三维位姿与任务路线' }}</span></div><span class="view-badge">3D 实时视图</span></div><RoomScene :robot="robot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
+          <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? (poseAnchor ? '三维位姿 · 视图原点已重置' : '三维位姿 · 开机点坐标系（重启归零）') : '三维位姿与任务路线' }}</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span><button v-if="hardwareMode" class="scene-reset" type="button" :disabled="!robot?.pose" data-testid="scene-reset" @click="resetViewAnchor">{{ poseAnchor ? '再次重置' : '重置视图' }}</button></span></div><RoomScene :robot="displayRobot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span v-if="poseAnchor">视图原点已重置（当前位置 = 场景中心）</span><span v-else>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
@@ -394,6 +410,10 @@ onBeforeUnmount(() => {
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
 .sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; }
 .sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
+.heading-actions { display: inline-flex; align-items: center; gap: 8px; }
+.scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.scene-reset:hover:not(:disabled) { border-color: #16888b; }
+.scene-reset:disabled { opacity: .5; cursor: not-allowed; }
 .monitor-placeholder {
   display: grid;
   place-items: center;
