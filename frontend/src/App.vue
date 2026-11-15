@@ -392,8 +392,8 @@ onBeforeUnmount(() => {
   .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image'; }
 }
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
-.sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
-.sidebar-teleop.lease-held { outline: 2px solid #f0b64f; outline-offset: 2px; }
+.sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; }
+.sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
 .monitor-placeholder {
   display: grid;
   place-items: center;

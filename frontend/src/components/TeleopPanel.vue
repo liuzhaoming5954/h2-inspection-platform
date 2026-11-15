@@ -320,7 +320,16 @@ function number(value: number | undefined, digits = 2) {
       <span :class="['teleop-badge', { active }]" data-testid="teleop-session-status" role="status"><i></i>{{ sessionLabel }}</span>
     </header>
     <div class="teleop-body">
-      <div class="teleop-session">
+      <div v-if="compact" class="teleop-power">
+        <button class="teleop-power-button" :class="{ on: active }" type="button"
+                :data-testid="phase === 'idle' ? 'teleop-acquire' : 'teleop-release'"
+                :disabled="phase === 'idle' && !!disabledReason"
+                @click="phase === 'idle' ? acquire() : endSession('本页遥控会话已结束。')">
+          <span aria-hidden="true" class="teleop-power-icon">⏻</span>{{ phase === 'idle' ? '申请控制权' : phase === 'acquiring' ? '正在申请…' : '释放控制权' }}
+        </button>
+        <small class="teleop-power-hint">{{ sessionLabel }}</small>
+      </div>
+      <div v-else class="teleop-session">
         <div><strong>遥控会话</strong><small>{{ active ? '当前浏览器已获得控制权' : '同一时刻仅允许一个遥控会话' }}</small></div>
         <button v-if="phase === 'idle'" class="teleop-session-button primary" type="button" :disabled="!!disabledReason" data-testid="teleop-acquire" @click="acquire">申请控制权</button>
         <button v-else class="teleop-session-button" type="button" data-testid="teleop-release" @click="endSession('本页遥控会话已结束。')">{{ active ? '释放控制权' : '取消申请' }}</button>
@@ -384,9 +393,54 @@ function number(value: number | undefined, digits = 2) {
 .teleop-note { min-height: 31px; margin: 11px 0 0; color: #6f8492; font-size: 10px; line-height: 1.6; }
 .teleop-note.warning { color: #9a5a26; }
 /* Compact docked variant (fixed sidebar in hardware mode): the whole lease
-   chain stays available, the telemetry grid yields to the narrow column. */
-.teleop-panel.compact { align-self: stretch; border-top-width: 3px; }
+   chain stays available, the telemetry grid yields to the narrow column, and
+   every surface adopts the sidebar's dark palette instead of the light
+   content-card theme. Lease control is a standalone power switch. */
+.teleop-panel.compact {
+  align-self: stretch;
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-top: 3px solid rgba(105, 180, 176, .55);
+}
+.teleop-panel.compact .panel-heading h2 { color: #e6eef5; font-size: 13px; }
+.teleop-panel.compact .teleop-badge { background: rgba(255, 255, 255, .06); border-color: rgba(255, 255, 255, .14); color: #9fb3c4; }
+.teleop-panel.compact .teleop-badge.active { color: #7fe0d2; border-color: rgba(53, 161, 140, .5); background: rgba(22, 136, 139, .15); }
 .teleop-panel.compact .teleop-body { padding: 10px 11px 9px; }
 .teleop-panel.compact .teleop-pad { margin: 10px auto 12px; }
-.teleop-panel.compact .teleop-note { min-height: 0; margin-top: 8px; }
+.teleop-panel.compact .teleop-direction,
+.teleop-panel.compact .teleop-stop {
+  background: rgba(255, 255, 255, .05);
+  border-color: rgba(255, 255, 255, .14);
+  color: #cfe0ea;
+}
+.teleop-panel.compact .teleop-direction:disabled,
+.teleop-panel.compact .teleop-stop:disabled {
+  color: #5d7185;
+  background: rgba(255, 255, 255, .02);
+  border-color: rgba(255, 255, 255, .07);
+}
+.teleop-panel.compact .teleop-direction:hover:not(:disabled) { border-color: rgba(127, 224, 210, .55); }
+.teleop-panel.compact .teleop-direction.pressed { background: #1ea8a0; border-color: #1ea8a0; color: #0b1c26; }
+.teleop-panel.compact .teleop-stop { background: rgba(157, 81, 64, .25); border-color: rgba(217, 138, 116, .45); color: #ffb9a3; }
+.teleop-panel.compact .teleop-stop:hover:not(:disabled) { background: rgba(157, 81, 64, .4); }
+.teleop-panel.compact .teleop-note { min-height: 0; margin-top: 8px; color: #93a9ba; }
+.teleop-panel.compact .teleop-note.warning { color: #ffb066; }
+
+/* Power switch: idle = teal "power on" (acquire), held = warm "power off"
+   (release), mirroring a physical mains switch in the docked column. */
+.teleop-power { margin: 2px 0 4px; }
+.teleop-power-button {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; min-height: 46px; padding: 8px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; font-weight: 600; letter-spacing: .5px;
+  border: 1px solid rgba(127, 224, 210, .4);
+  background: rgba(22, 136, 139, .18);
+  color: #7fe0d2;
+}
+.teleop-power-button:hover:not(:disabled) { background: rgba(22, 136, 139, .32); }
+.teleop-power-button:disabled { opacity: .45; cursor: not-allowed; }
+.teleop-power-button.on { border-color: rgba(232, 137, 107, .6); background: rgba(157, 81, 64, .3); color: #ffb9a3; }
+.teleop-power-button.on:hover { background: rgba(157, 81, 64, .45); }
+.teleop-power-icon { font-size: 17px; line-height: 1; }
+.teleop-power-hint { display: block; margin-top: 5px; text-align: center; color: #7d93a6; font-size: 9px; }
 </style>
