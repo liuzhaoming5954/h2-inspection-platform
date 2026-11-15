@@ -337,19 +337,6 @@ onBeforeUnmount(() => {
       <div class="workspace-label">验证工作区</div>
       <div class="nav-item active"><span class="nav-symbol">▦</span> {{ hardwareMode ? '真机遥控台' : '巡检验证台' }} <span class="nav-selected"></span></div>
       <TeleopPanel v-if="modeKnown && hardwareMode" class="sidebar-teleop" :class="{ 'lease-held': teleopSession }" compact :robot="robot" :hardware="true" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
-      <div v-if="modeKnown && hardwareMode" class="field-panel" aria-label="链路管理">
-        <div class="field-title">链路管理</div>
-        <div class="field-lights">
-          <span :class="['field-light', { on: fieldStatus?.pc2_agent }]"><i></i>PC2 代理</span>
-          <span :class="['field-light', { on: fieldStatus?.gateway }]"><i></i>PC3 网关</span>
-          <span :class="['field-light', { on: fieldStatus?.forwards?.['15051'] }]"><i></i>状态转发</span>
-          <span :class="['field-light', { on: fieldStatus?.forwards?.['15052'] }]"><i></i>遥控转发</span>
-        </div>
-        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
-        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2 代理' }}</button>
-        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3 网关' }}</button>
-        <small v-if="fieldMessage" class="field-message">{{ fieldMessage }}</small>
-      </div>
       <template v-if="modeKnown && !hardwareMode">
         <div class="sidebar-section">验证链路</div>
         <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
@@ -363,6 +350,21 @@ onBeforeUnmount(() => {
     <main class="main-content">
       <header class="topbar"><div class="breadcrumb">{{ hardwareMode ? 'H2 真机' : '巡检管理' }} <span>/</span> 技术验证台</div><div class="topbar-right"><span class="env-tag">开发验证</span><time>{{ clock.toLocaleString('zh-CN', { hour12: false }) }}</time><span class="avatar">验</span></div></header>
       <div class="page-content">
+      <section v-if="modeKnown && hardwareMode" class="field-strip" aria-label="链路管理">
+        <span class="field-strip-title">链路管理</span>
+        <div class="field-lights">
+          <span :class="['field-light', { on: fieldStatus?.pc2_agent }]"><i></i>PC2 代理</span>
+          <span :class="['field-light', { on: fieldStatus?.gateway }]"><i></i>PC3 网关</span>
+          <span :class="['field-light', { on: fieldStatus?.forwards?.['15051'] }]"><i></i>状态转发</span>
+          <span :class="['field-light', { on: fieldStatus?.forwards?.['15052'] }]"><i></i>遥控转发</span>
+        </div>
+        <div class="field-actions">
+          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
+          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2 代理' }}</button>
+          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3 网关' }}</button>
+        </div>
+        <small v-if="fieldMessage" class="field-message">{{ fieldMessage }}</small>
+      </section>
         <div class="page-heading"><div><div class="eyebrow">{{ hardwareMode ? 'H2 LOCOMOTION' : 'ROBOT INSPECTION / PROOF OF CONCEPT' }}</div><h1>{{ hardwareMode ? 'H2 真机遥控验证台' : '巡检技术验证台' }}</h1><p>{{ hardwareMode ? '通过宇树高层运动服务验证前进、后退、转向和停步。' : '连接任务、机器人与巡检证据，验证完整业务链路。' }}</p></div><button class="api-link" type="button" @click="refreshAll"><span>↻</span> 刷新状态</button></div>
         <div v-if="hardwareMode" class="validation-banner hardware-banner"><span class="banner-icon">i</span><div><strong>H2 真机模式</strong><span>方向指令会驱动实际机器人。停步请求获应答后，请在现场确认机器人停稳。</span></div></div>
         <div v-else-if="modeKnown" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
@@ -455,18 +457,20 @@ onBeforeUnmount(() => {
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
 .sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; }
 .sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
-/* Field-link panel: manual chain status and one-shot SSH actions. */
-.field-panel { margin: 14px -6px 0; padding: 12px 12px 11px; border: 1px solid rgba(255, 255, 255, .1); border-radius: 8px; background: rgba(255, 255, 255, .04); }
-.field-title { margin-bottom: 10px; color: #e6eef5; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
-.field-lights { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-bottom: 10px; }
-.field-light { display: flex; align-items: center; gap: 6px; color: #7d93a6; font-size: 10px; }
-.field-light i { width: 7px; height: 7px; border-radius: 50%; background: #44546b; box-shadow: 0 0 0 1px rgba(255, 255, 255, .08) inset; }
-.field-light.on { color: #b9cbd9; }
-.field-light.on i { background: #35a18c; box-shadow: 0 0 6px rgba(53, 161, 140, .55); }
-.field-button { display: block; width: 100%; margin-top: 7px; padding: 9px; border: 1px solid rgba(255, 255, 255, .16); border-radius: 7px; background: rgba(255, 255, 255, .05); color: #cfe0ea; cursor: pointer; font-size: 11px; }
-.field-button:hover:not(:disabled) { border-color: rgba(127, 224, 210, .5); }
-.field-button:disabled { opacity: .45; cursor: not-allowed; }
-.field-message { display: block; margin-top: 8px; color: #93a9ba; font-size: 9px; line-height: 1.5; }
+/* Field-link strip: manual chain status and one-shot SSH actions, docked at
+   the top of the main content so the sidebar keeps only the teleop dock. */
+.field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 14px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
+.field-strip-title { color: #4e6675; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
+.field-lights { display: flex; gap: 16px; }
+.field-light { display: flex; align-items: center; gap: 6px; color: #8a9dab; font-size: 11px; }
+.field-light i { width: 8px; height: 8px; border-radius: 50%; background: #c3d0d9; }
+.field-light.on { color: #496875; }
+.field-light.on i { background: #35a18c; box-shadow: 0 0 5px rgba(53, 161, 140, .5); }
+.field-actions { display: flex; gap: 8px; margin-left: auto; }
+.field-button { padding: 7px 12px; border: 1px solid #c9dedf; border-radius: 6px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.field-button:hover:not(:disabled) { border-color: #16888b; }
+.field-button:disabled { opacity: .5; cursor: not-allowed; }
+.field-message { color: #718694; font-size: 10px; }
 .heading-actions { display: inline-flex; align-items: center; gap: 8px; }
 .scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .scene-reset:hover:not(:disabled) { border-color: #16888b; }
