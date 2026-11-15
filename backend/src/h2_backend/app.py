@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from . import field
 from .config import Settings
 from .service import InspectionService, ServiceError
 from .teleop import UI_ORIGINS, teleop_socket
@@ -106,6 +107,37 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     @app.get("/api/health")
     def health():
         return service.health()
+
+    # Field-link management: manual, human-clicked operations only. The sync
+    # handlers block for seconds (SSH), FastAPI runs them in its threadpool.
+    @app.get("/api/field/status")
+    def field_status():
+        try:
+            connected = service.health().get("gateway") == "connected"
+        except Exception:
+            connected = False
+        return field.status(connected)
+
+    @app.post("/api/field/reconnect-forwards")
+    def field_reconnect_forwards():
+        try:
+            return field.reconnect_forwards()
+        except Exception as error:
+            return {"ok": False, "error": str(error)[:200]}
+
+    @app.post("/api/field/start-pc2")
+    def field_start_pc2():
+        try:
+            return field.start_pc2_agent()
+        except Exception as error:
+            return {"ok": False, "error": str(error)[:200]}
+
+    @app.post("/api/field/start-pc3")
+    def field_start_pc3():
+        try:
+            return field.start_pc3_gateway()
+        except Exception as error:
+            return {"ok": False, "error": str(error)[:200]}
 
     @app.get("/api/robot")
     def robot():

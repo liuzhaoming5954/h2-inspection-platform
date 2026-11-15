@@ -84,6 +84,35 @@ function resetViewAnchor() {
   const pose = robot.value?.pose
   if (pose) poseAnchor.value = { x: pose.x, y: pose.y, yaw: pose.yaw }
 }
+
+// Field-link panel: manual, human-clicked operations only. Nothing reconnects
+// by itself - the lights show the chain, the buttons do one thing each.
+interface FieldStatus { pc2_agent: boolean; forwards: Record<string, boolean>; gateway: boolean }
+const fieldStatus = ref<FieldStatus | null>(null)
+const fieldBusy = ref('')
+const fieldMessage = ref('')
+let fieldTimer: ReturnType<typeof setInterval> | undefined
+
+async function pollField() {
+  try {
+    fieldStatus.value = await request<FieldStatus>('/api/field/status', { cache: 'no-store' })
+  } catch { /* The panel simply keeps its last snapshot between polls. */ }
+}
+
+async function fieldAction(kind: 'reconnect-forwards' | 'start-pc2' | 'start-pc3') {
+  if (fieldBusy.value) return
+  fieldBusy.value = kind
+  fieldMessage.value = ''
+  try {
+    const result = await request<{ ok: boolean; already?: boolean; error?: string }>(`/api/field/${kind}`, { method: 'POST' })
+    fieldMessage.value = result.ok ? (result.already ? '已在运行，未重复启动' : '完成') : `失败：${result.error ?? '未知原因'}`
+  } catch (error) {
+    fieldMessage.value = `失败：${errorMessage(error)}`
+  } finally {
+    fieldBusy.value = ''
+    void pollField()
+  }
+}
 const stateNames: Record<string, string> = { idle: '待命', ready: '待命', pending_dispatch: '等待派发', accepted: '任务已接收', running: '巡检中', completed: '已完成', stopped: '已停止', interrupted: '执行中断', failed: '执行失败', rejected: '未接受', expired: '已过期', dispatch_expired: '派发已过期', stopping: '正在停止', offline: '离线', teleop: '手动遥控' }
 const hardwareStateNames: Record<string, string> = { ready: '可遥控', not_ready: '未就绪', offline: '离线', teleop: '遥控会话中', fault: '故障' }
 const hardwareState = computed(() => robotAvailable.value && robot.value?.simulated === false && robot.value.status
@@ -286,6 +315,8 @@ function openReview() { reviewNote.value = selectedTask.value?.review_note ?? ''
 onMounted(() => {
   void poll()
   void pollRobot()
+  void pollField()
+  fieldTimer = setInterval(() => { if (!fieldBusy.value) void pollField() }, 5000)
   clockTimer = setInterval(() => { clock.value = new Date() }, 1000)
 })
 onBeforeUnmount(() => {
@@ -293,6 +324,7 @@ onBeforeUnmount(() => {
   clearTimeout(pollTimer)
   clearTimeout(robotPollTimer)
   clearTimeout(environmentTimer)
+  clearInterval(fieldTimer)
   clearInterval(clockTimer)
   robotRequest?.abort()
 })
@@ -305,6 +337,19 @@ onBeforeUnmount(() => {
       <div class="workspace-label">验证工作区</div>
       <div class="nav-item active"><span class="nav-symbol">▦</span> {{ hardwareMode ? '真机遥控台' : '巡检验证台' }} <span class="nav-selected"></span></div>
       <TeleopPanel v-if="modeKnown && hardwareMode" class="sidebar-teleop" :class="{ 'lease-held': teleopSession }" compact :robot="robot" :hardware="true" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
+      <div v-if="modeKnown && hardwareMode" class="field-panel" aria-label="链路管理">
+        <div class="field-title">链路管理</div>
+        <div class="field-lights">
+          <span :class="['field-light', { on: fieldStatus?.pc2_agent }]"><i></i>PC2 代理</span>
+          <span :class="['field-light', { on: fieldStatus?.gateway }]"><i></i>PC3 网关</span>
+          <span :class="['field-light', { on: fieldStatus?.forwards?.['15051'] }]"><i></i>状态转发</span>
+          <span :class="['field-light', { on: fieldStatus?.forwards?.['15052'] }]"><i></i>遥控转发</span>
+        </div>
+        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
+        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2 代理' }}</button>
+        <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3 网关' }}</button>
+        <small v-if="fieldMessage" class="field-message">{{ fieldMessage }}</small>
+      </div>
       <template v-if="modeKnown && !hardwareMode">
         <div class="sidebar-section">验证链路</div>
         <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
@@ -410,6 +455,18 @@ onBeforeUnmount(() => {
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
 .sidebar-teleop { margin: 16px -6px 0; border-radius: 8px; }
 .sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
+/* Field-link panel: manual chain status and one-shot SSH actions. */
+.field-panel { margin: 14px -6px 0; padding: 12px 12px 11px; border: 1px solid rgba(255, 255, 255, .1); border-radius: 8px; background: rgba(255, 255, 255, .04); }
+.field-title { margin-bottom: 10px; color: #e6eef5; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
+.field-lights { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-bottom: 10px; }
+.field-light { display: flex; align-items: center; gap: 6px; color: #7d93a6; font-size: 10px; }
+.field-light i { width: 7px; height: 7px; border-radius: 50%; background: #44546b; box-shadow: 0 0 0 1px rgba(255, 255, 255, .08) inset; }
+.field-light.on { color: #b9cbd9; }
+.field-light.on i { background: #35a18c; box-shadow: 0 0 6px rgba(53, 161, 140, .55); }
+.field-button { display: block; width: 100%; margin-top: 7px; padding: 9px; border: 1px solid rgba(255, 255, 255, .16); border-radius: 7px; background: rgba(255, 255, 255, .05); color: #cfe0ea; cursor: pointer; font-size: 11px; }
+.field-button:hover:not(:disabled) { border-color: rgba(127, 224, 210, .5); }
+.field-button:disabled { opacity: .45; cursor: not-allowed; }
+.field-message { display: block; margin-top: 8px; color: #93a9ba; font-size: 9px; line-height: 1.5; }
 .heading-actions { display: inline-flex; align-items: center; gap: 8px; }
 .scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .scene-reset:hover:not(:disabled) { border-color: #16888b; }
