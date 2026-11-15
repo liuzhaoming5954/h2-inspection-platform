@@ -9,9 +9,11 @@ from pathlib import Path
 from threading import Event
 import time
 from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from h2_gateway import server
 from h2_gateway.client import GatewayClient
 from h2_gateway.hardware import AgentEnvironment, H2HardwareGateway
 from h2_gateway.server import create_server
@@ -20,6 +22,36 @@ from test_hardware import RecordingLoco, send, wait_for
 
 
 PC2_INSTANCE = 'a' * 32
+
+
+@pytest.mark.parametrize(("config", "bind", "sample_url"), [
+    ({}, "192.168.124.162", "http://192.168.124.162:8090/environment"),
+    ({"H2_PC2_HOST": "10.42.8.22"}, "10.42.8.22", "http://10.42.8.22:8090/environment"),
+    ({"H2_PC2_HOST": "10.42.8.22", "H2_PC2_BIND": "10.42.9.22", "H2_SENSOR_AGENT_URL": "http://pc2.example:8090/environment"},
+     "10.42.9.22", "http://pc2.example:8090/environment"),
+])
+def test_pc2_listener_and_pc3_sampling_address(monkeypatch, config, bind, sample_url):
+    for name in ("H2_PC2_HOST", "H2_PC2_BIND", "H2_SENSOR_AGENT_URL"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in config.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setitem(sys.modules, "serial", ModuleType("serial"))
+    agent = Path(__file__).resolve().parents[2] / "scripts" / "sensor_agent_pc2.py"
+    pc2 = runpy.run_path(str(agent))
+    assert (pc2["BIND"], pc2["HTTP_PORT"]) == (bind, 8090)
+
+    # 在创建采样客户端时结束入口，避免连接 DDS、串口和网络。
+    environment = Mock(side_effect=SystemExit(0))
+    monkeypatch.setattr(server, "UnitreeLoco", Mock())
+    monkeypatch.setattr(server, "BmsWatcher", Mock())
+    monkeypatch.setattr(server, "OdomWatcher", Mock())
+    monkeypatch.setattr(server, "AgentEnvironment", environment)
+    monkeypatch.setattr(sys, "argv", ["server", "--h2-interface", "fixture"])
+    with pytest.raises(SystemExit) as exit_info:
+        server.main()
+    assert exit_info.value.code == 0
+    environment.assert_called_once_with(sample_url)
 
 
 def test_pc2_uses_monotonic_sample_age_and_unique_identity(monkeypatch):

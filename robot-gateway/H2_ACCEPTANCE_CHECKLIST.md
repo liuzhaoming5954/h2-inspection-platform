@@ -6,20 +6,20 @@
 
 | 设备 | 更新或复用 | 开测前确认 |
 | --- | --- | --- |
-| PC2 | 更新并重启 `scripts/sensor_agent_pc2.py`，使用 `pyserial`。脚本启动方式下更新 PC2 的 `~/sensor_agent.py`。 | 确认 RS-485 串口、运行账号权限、PC2 开发网地址和 HTTP 端口。 |
-| PC3 | 更新并重启网关，一并更新生成的 Protobuf 文件。复用已验证的 Python、SDK2 和 CycloneDDS 环境。 | 确认运控侧网卡、PC3 开发网地址和 SSH 账号。首次安装参照现场联调手册第 3 节。 |
-| 上位机 | 前端和后端一并更新，安装项目 Python 和前端依赖。 | 上位机接 H2 外部开发网，浏览器在上位机本机运行。通过可信渠道核对并登记 PC3 的 SSH 主机密钥。 |
+| PC2 | 更新并重启 `scripts/sensor_agent_pc2.py`，使用 `pyserial`。脚本启动方式下更新 PC2 的 `~/sensor_agent.py`。 | 确认 RS-485 串口、运行账号权限、`H2_PC2_HOST` 或 `H2_PC2_BIND` 对应的监听地址和端口 `8090`。 |
+| PC3 | 更新并重启网关。首次安装运行 `bash scripts/deploy/setup_pc3.sh`，待网关、SDK2 与 CycloneDDS 的导入检查通过。 | 确认运控侧网卡、PC3 开发网地址、SSH 账号和从 PC3 可访问的 PC2 采样 URL。 |
+| 上位机 | 前端和后端一并更新。首次安装运行 `bash scripts/deploy/setup_workstation.sh` 安装依赖和项目包。 | 接入 H2 外部开发网，设置 `H2_PC2_HOST` 和 `H2_PC3_HOST`，通过可信渠道核对并登记 PC3 的 SSH 主机密钥。 |
 
 - [ ] PC3 和上位机分别在仓库根目录运行 `git rev-parse --short HEAD`，确认部署同一提交，并记录对应进程的重启结果。PC2 部署同一提交中的代理。有效期使用单调时钟计算，三台设备无需同步系统时钟。
 - [ ] 现场负责人确认测试区已清场、防跌倒措施及原厂急停可用。安排操作员和观察员，先约定可接受的实际停稳时间和距离。切换运控模式及真机动作由现场人员按厂商流程执行。[宇树开发文档中心](https://support.unitree.com/home/)
 
 ## 三端启动与就绪检查
 
-以下命令在对应设备的项目根目录执行。先把示例 `pc2-host` 和 `8090` 换成 PC2 代理的实际地址和端口，把 `eth10` 换成 PC3 的运控侧网卡，把 `pc3-user@pc3-host` 换成现场 SSH 账号和 PC3 开发网地址。
+以下命令在对应设备的项目根目录执行。先把示例 `192.168.50.162` 换成现场 PC2 地址，把 `eth10` 换成 PC3 的运控侧网卡，把 `pc3-user@pc3-host` 换成现场 SSH 账号和 PC3 开发网地址。换网段后用新配置启动 PC2、PC3 和上位机，并按下面的顺序核验。[地址配置示例](../scripts/deploy/README.md#换网段与启动)
 
 ### 1. PC2 启动温湿度代理
 
-- [ ] 在 `scripts/sensor_agent_pc2.py` 中核对 `PORT`、`BIND`、`HTTP_PORT`。`PORT` 是现场 RS-485 串口，`BIND` 是 PC3 可达的 PC2 开发网地址。确认代理账号可以访问串口。已确认运行新版代理时，直接做下面的 PC3 查询。
+- [ ] 在 `scripts/sensor_agent_pc2.py` 中核对串口 `PORT`，确认代理账号可以访问串口。用 `H2_PC2_HOST` 指定开发网地址，需要单独指定本机监听地址时再设置 `H2_PC2_BIND`。已确认代理使用新版配置时，直接做下面的 PC3 查询。
 - [ ] 首次部署或缺少依赖时，先准备 Python 环境。
 
 ```bash
@@ -30,13 +30,13 @@ python3 -m venv .venv
 - [ ] 在 PC2 启动代理并保留前台终端。若现场用服务管理器部署，沿用该服务启停。
 
 ```bash
-.venv/bin/python -u scripts/sensor_agent_pc2.py
+H2_PC2_HOST=192.168.50.162 .venv/bin/python -u scripts/sensor_agent_pc2.py
 ```
 
 - [ ] 在 **PC3** 查询 PC2。确认返回 `available: true`，`sample` 包含 `temperature_c`、`humidity_percent`、`sample_id`、数值型 `captured_at` 和 `age_seconds`。间隔几秒查询一次，确认样本标识随新采样更新。
 
 ```bash
-curl --fail --show-error --max-time 5 'http://pc2-host:8090/environment'
+curl --fail --show-error --max-time 5 'http://192.168.50.162:8090/environment'
 ```
 
 ### 2. PC3 只读探测并启动网关
@@ -51,10 +51,10 @@ export CYCLONEDDS_HOME="$PWD/.runtime/h2-sdk2/cyclonedds-install"
 ```
 
 - [ ] 只读探测应返回 `fsm_id: 601`、`fsm_mode: 0`、`teleop_ready: true`。若返回 `3102`，检查 PC3 运控网卡和 DDS 服务发现。若运控未就绪，先由现场人员确认 H2 状态，再复测。
-- [ ] 探测就绪后启动网关。若旧网关仍在运行，先按原部署方式停止并确认退出。使用上一步在 PC3 验证过的 PC2 代理地址，保留 PC3 网关终端及日志。
+- [ ] 探测就绪后启动网关。若旧网关仍在运行，先按原部署方式停止并确认退出。采样 URL 默认由 `H2_PC2_HOST` 生成，PC3 需要走不同地址时另设 `H2_SENSOR_AGENT_URL`。使用第 1 节在 PC3 验证过的代理 URL，保留网关终端及日志。
 
 ```bash
-H2_SENSOR_AGENT_URL='http://pc2-host:8090/environment' \
+H2_PC2_HOST=192.168.50.162 \
   .venv/bin/python -u -m h2_gateway.server \
   --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052
 ```
@@ -88,7 +88,7 @@ ssh -N -T -S none \
 .venv/bin/python scripts/dev.py status
 ```
 
-- [ ] 在应用终端启动外置网关模式。上位机运行前后端并使用独立 SQLite。首次部署按项目 README 安装 Python 和前端依赖，外置网关模式可跳过 PostgreSQL 下载和启动。[上位机依赖说明](../README.md#本地启动)
+- [ ] 在应用终端设置现场的 `H2_PC2_HOST` 和 `H2_PC3_HOST`，再启动外置网关模式。上位机运行前后端并使用独立 SQLite。外置网关模式可跳过 PostgreSQL 下载和启动。[上位机安装与地址设置](../scripts/deploy/README.md)
 
 ```bash
 .venv/bin/python scripts/dev.py start --external-gateway 127.0.0.1:15051 \

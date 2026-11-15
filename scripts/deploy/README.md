@@ -1,17 +1,16 @@
 # 三机部署指南（H2 真机遥控链路）
 
-> 目标：在任何一台新电脑上，拉取本仓库即可完成整条链路的部署。
-> 原则：**仓库是唯一部署源**；机器特定信息走环境变量；凭据永不入库。
+在各机准备系统工具后，从同一版本的仓库安装项目依赖。现场地址和 SSH 凭据通过环境变量提供。
 
 ## 链路结构与部署顺序
 
 ```
-[工作站] ──SSH转发(15051/15052)──> [PC3 网关] ──DDS──> [H2 运控]
-    │                                 │
-    └──HTTP──> [PC2 传感器代理] <──RS-485── 温湿度传感器（接 PC2 /dev/ttyACM0）
+[上位机] ──双 SSH 转发──> [PC3 网关] ──DDS──> [H2 运控]
+[上位机] ──HTTP 探测──> [PC2 传感器代理]
+[PC3 网关] ──HTTP 采样──> [PC2 传感器代理] ──RS-485──> [温湿度传感器]
 ```
 
-按 **PC2 → PC3 → 工作站** 顺序部署。三台机器的默认地址：PC2 `192.168.124.162`、PC3 `192.168.124.163`（不同网段用环境变量覆盖，见下）。
+按 **PC2 → PC3 → 上位机** 顺序部署。
 
 ## 各机部署
 
@@ -20,30 +19,52 @@
 # 仓库任意方式放到 PC2 的 ~/h2-inspection-platform（git clone 推荐）
 bash ~/h2-inspection-platform/scripts/deploy/setup_pc2.sh
 ```
-做三件事：装 pyserial（`~/pylibs`）、把仓库的 `scripts/sensor_agent_pc2.py` 安装为 `~/sensor_agent.py`、探针验证。串口默认 `/dev/ttyACM0`（机身接口 10 的 RS-485），现场不同改脚本顶部 `PORT`。
+脚本把 `pyserial` 安装到 `~/pylibs`，把代理复制到 `~/sensor_agent.py`，并列出本机串口。串口默认 `/dev/ttyACM0`（机身接口 10 的 RS-485），如有差异，在部署前调整代理脚本顶部的 `PORT`。
 
 ### PC3（遥控网关）
+
+准备 Python 3.12 或更高版本、`venv` 和该版本的开发头文件、Git、CMake 3.16 或更高版本、C 编译器和构建工具。首次安装需要能下载源码和 Python 依赖。
+
 ```bash
 bash ~/h2-inspection-platform/scripts/deploy/setup_pc3.sh
 ```
-指引安装 Python 3.12+、宇树 SDK2（pinned 版本）与 CycloneDDS 0.10.2（仓库内构建，`-DBUILD_DDSPERF=OFF`），并验证 `.venv` 与 `h2_gateway` 可导入。网关进程本身由工作站侧拉起，无需在 PC3 手动启动。
+
+脚本把 CycloneDDS 0.10.2 准备到 `.runtime/h2-sdk2/cyclonedds-install`，使用该目录编译 Python 绑定，并安装 NumPy、OpenCV headless、本仓库的 `h2_gateway` 和固定版本的宇树 SDK2。最后检查 Python 绑定使用的库路径和模块是否能导入。网关启动由一键脚本或现场手动步骤执行。[CycloneDDS 库加载顺序](https://github.com/eclipse-cyclonedds/cyclonedds-python/blob/0.10.2/cyclonedds/internal.py)
 
 ### 工作站（上位机 + 编排）
+
+准备 Python 3.12（含 `venv`）、Node.js 24.12 至 24.x、pnpm、Pango 和中文字体。现场启动需要 `curl`、OpenSSH 客户端、`sshpass` 和 `iproute2`。
+
 ```bash
-bash scripts/deploy/setup_workstation.sh   # 装 Python 依赖、前端依赖、生成 ~/h2-start.sh 包装器
-export H2_FIELD_PASSWORD='<机器人PC密码>'   # 当前会话或写入个人 shell 配置（勿入库）
-~/h2-start.sh                              # 一键起链：PC2 代理 → PC3 网关 → 双转发 → 上位机栈 → 自检
+bash scripts/deploy/setup_workstation.sh
 ```
 
-## 环境变量一览
+脚本使用项目的 Python 锁定依赖和前端锁文件，安装本仓库的 `h2_backend` 和 `h2_gateway`，检查 Python 依赖和模块导入后生成 `~/h2-start.sh`。启动脚本继承当前终端的配置。
+
+## 换网段与启动
+
+以下以 PC2 为 `192.168.50.162`、PC3 为 `192.168.50.163` 为例。在**上位机**终端按现场实际地址设置后启动。一键脚本会将 PC2 的监听配置传给 PC2，将采样地址传给 PC3。
+
+```bash
+export H2_PC2_HOST=192.168.50.162
+export H2_PC3_HOST=192.168.50.163
+read -rsp '机器人 PC 的 SSH 密码：' H2_FIELD_PASSWORD
+printf '\n'
+export H2_FIELD_PASSWORD
+~/h2-start.sh
+```
 
 | 变量 | 默认值 | 用途 |
-|---|---|---|
-| `H2_FIELD_PASSWORD` | （无，必设） | SSH 到 PC2/PC3 的密码 |
-| `H2_PC2_HOST` | `192.168.124.162` | PC2 开发网地址 |
-| `H2_PC3_HOST` | `192.168.124.163` | PC3 开发网地址 |
-| `H2_GATEWAY_ADDRESS` | `127.0.0.1:15051` | 后端连网关的目标 |
-| `H2_TELEOP_GATEWAY_ADDRESS` | `127.0.0.1:15052` | 后端连遥控通道的目标 |
+| --- | --- | --- |
+| `H2_PC2_HOST` | `192.168.124.162` | 上位机访问 PC2 的 SSH 和 HTTP 地址，也用作 PC2 默认监听地址和 PC3 默认采样主机 |
+| `H2_PC2_BIND` | `H2_PC2_HOST` | PC2 监听的本机地址。访问地址与本机网卡地址不同时单独设置 |
+| `H2_SENSOR_AGENT_URL` | `http://$H2_PC2_HOST:8090/environment` | PC3 采样 URL。PC3 通过另一个地址访问 PC2 时可单独设置 |
+| `H2_PC3_HOST` | `192.168.124.163` | 上位机连接 PC3 的开发网地址 |
+| `H2_FIELD_PASSWORD` | 由现场账号提供 | 当前终端和上位机进程使用的 SSH 凭据 |
+| `H2_GATEWAY_ADDRESS` | `127.0.0.1:15051`（一键启动） | 由启动器按网关参数写入，供后端连接状态通道 |
+| `H2_TELEOP_GATEWAY_ADDRESS` | `127.0.0.1:15052`（一键启动） | 由启动器按网关参数写入，供后端连接遥控通道 |
+
+手动部署时分别在 PC2、PC3 和上位机配置 `H2_PC2_HOST`。如需在界面恢复现场进程，在启动上位机前从同一终端导出 `H2_FIELD_PASSWORD` 和现场实际使用的 `H2_PC2_BIND`、`H2_SENSOR_AGENT_URL` 覆盖项。更换地址前按各端原部署方式停止旧进程，使用新配置重启。若 PC3 地址也变了，先清理指向旧 PC3 的转发。一键启动会复用已运行的代理和网关，进程启动时读取配置。[三端手动部署](../../robot-gateway/H2_COMMISSIONING.md)
 
 ## 运行期规则（重要）
 

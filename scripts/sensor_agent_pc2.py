@@ -11,6 +11,7 @@ Modbus 逻辑移植自经过现场验证的 read_sensor.py。
 from __future__ import annotations
 
 import json
+import os
 import struct
 import threading
 import time
@@ -20,7 +21,7 @@ from uuid import uuid4
 import serial
 
 PORT = "/dev/ttyACM0"
-BIND = "192.168.124.162"
+BIND = os.getenv("H2_PC2_BIND") or os.getenv("H2_PC2_HOST") or "192.168.124.162"
 HTTP_PORT = 8090
 POLL_SECONDS = 1.0
 FRESH_SECONDS = 8.0

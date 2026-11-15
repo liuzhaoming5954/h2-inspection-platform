@@ -19,6 +19,9 @@ ROBOT_ONLY=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PC2="${H2_PC2_HOST:-192.168.124.162}"
+PC2_BIND="${H2_PC2_BIND:-$PC2}"
+PC2_AGENT_URL="http://$PC2:8090/environment"
+PC3_SENSOR_AGENT_URL="${H2_SENSOR_AGENT_URL:-$PC2_AGENT_URL}"
 PC3="${H2_PC3_HOST:-192.168.124.163}"
 LOG_DIR="$ROOT/.runtime/logs"
 mkdir -p "$LOG_DIR"
@@ -29,12 +32,17 @@ if [ -z "$PASS" ]; then
   else echo "set H2_FIELD_PASSWORD (or run from a terminal)"; exit 1; fi
 fi
 
+# SSH 由远端 shell 解释命令，配置值必须作为单个参数传递。
+quote_for_ssh() {
+  printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+
 echo "== 1/4 PC2 sensor agent =="
-if curl -s --max-time 3 "http://$PC2:8090/environment" | grep -q '"available"'; then
+if curl -s --max-time 3 "$PC2_AGENT_URL" | grep -q '"available"'; then
   echo "   already running"
 else
   sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC2" \
-    'PYTHONPATH=$HOME/pylibs nohup python3 ~/sensor_agent.py > ~/sensor_agent.log 2>&1 < /dev/null &' \
+    "H2_PC2_BIND=$(quote_for_ssh "$PC2_BIND") PYTHONPATH=\$HOME/pylibs nohup python3 ~/sensor_agent.py > ~/sensor_agent.log 2>&1 < /dev/null &" \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
     && echo "   started" || echo "   FAILED (PC2 offline?)"
 fi
@@ -59,7 +67,7 @@ else
   # 即使将标准输入重定向到 /dev/null，通过 SSH 运行 nohup 也可能挂起通道，因此设置超时。
   # 超时后 PC3 上的后台进程仍可能已启动，由后续探测确认。
   timeout 15 sshpass -p "$PASS" ssh unitree@"$PC3" \
-    'cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &' \
+    "cd ~/h2-inspection-platform && CYCLONEDDS_HOME=\$PWD/.runtime/h2-sdk2/cyclonedds-install H2_SENSOR_AGENT_URL=$(quote_for_ssh "$PC3_SENSOR_AGENT_URL") nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &" \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
     && echo "   started" || echo "   launch command timed out or failed - probing to confirm"
   sleep 3

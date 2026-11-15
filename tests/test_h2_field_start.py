@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -22,14 +23,22 @@ def field_start(tmp_path):
 case "${0##*/}" in
   curl)
     case "$*" in
-      *:8090/environment) printf '%s\\n' '{"available":true}' ;;
+      *:8090/environment)
+        if [[ "$TEST_START_COMPONENTS" == 1 ]]; then
+          printf '%s\\n' "${!#}" >> "$TEST_SENSOR_CALLS"
+          exit 1
+        fi
+        printf '%s\\n' '{"available":true}' ;;
       *:8000/api/health|*:5173/) grep -q '^scripts/dev.py start ' "$TEST_WORKSTATION_CALLS" ;;
       *) exit 98 ;;
     esac ;;
   sshpass)
     case "$*" in
       *h2_gateway.hardware*) printf '%s\\n' '{"teleop_ready": true}' ;;
-      *pgrep*) exit 0 ;;
+      *pgrep*) [[ "$TEST_START_COMPONENTS" == 0 ]] ;;
+      *nohup*)
+        [[ "$TEST_START_COMPONENTS" == 1 ]] || exit 98
+        printf '%s\\n' "${@: -2}" >> "$TEST_SENSOR_CALLS" ;;
       *) exit 98 ;;
     esac ;;
   ss)
@@ -44,11 +53,16 @@ case "${0##*/}" in
     read -r port < "$TEST_LAST_PORT"
     printf 'ssh -S none -L 127.0.0.1:%s:127.0.0.1:%s unitree@%s \\n' "$port" "$((port + 35000))" "$H2_PC3_HOST" ;;
   readlink) printf '%s\\n' /test/bin/ssh ;;
-  timeout) exit 1 ;;
+  timeout)
+    case "$*" in
+      *h2_gateway.server*) shift; exec "$@" ;;
+      *) exit 1 ;;
+    esac ;;
+  sleep) exit 0 ;;
 esac
 """)
     commands.chmod(0o755)
-    for name in ("curl", "sshpass", "ss", "tr", "readlink", "timeout"):
+    for name in ("curl", "sshpass", "ss", "tr", "readlink", "timeout", "sleep"):
         (bin_dir / name).symlink_to(commands.name)
 
     workstation = tmp_path / ".venv" / "bin" / "python"
@@ -93,7 +107,7 @@ class GatewayClient:
     workstation_calls = tmp_path / "workstation-calls"
     probe_calls = tmp_path / "probe-calls"
 
-    def run(*args, failure="", failed_port=0, allow_workstation=False):
+    def run(*args, failure="", failed_port=0, allow_workstation=False, sensor_settings=None):
         result = subprocess.run(
             ["/bin/bash", str(copied_script), *args],
             env={
@@ -110,6 +124,9 @@ class GatewayClient:
                 "TEST_PROBE_CALLS": str(probe_calls),
                 "TEST_ALLOW_WORKSTATION": "1" if allow_workstation else "0",
                 "TEST_WORKSTATION_CALLS": str(workstation_calls),
+                "TEST_START_COMPONENTS": "1" if sensor_settings else "0",
+                "TEST_SENSOR_CALLS": str(tmp_path / "sensor-calls"),
+                **(sensor_settings or {}),
             },
             capture_output=True,
             text=True,
@@ -156,3 +173,20 @@ def test_full_start_restarts_workstation_once_after_both_forward_checks(field_st
         "scripts/dev.py start --external-gateway 127.0.0.1:15051 --external-teleop-gateway 127.0.0.1:15052",
         "scripts/h2_field_check.py",
     ]
+
+
+@pytest.mark.parametrize("override_url", [None, "http://pc2-private.example:8090/environment?name='h2'&lane=pc3"])
+def test_one_click_passes_configured_sensor_addresses(field_start, tmp_path, override_url):
+    settings = {"H2_PC2_HOST": "10.42.8.22", "H2_PC2_BIND": "10.42.9.22", "H2_PC3_HOST": "10.42.8.23"}
+    if override_url is not None:
+        settings["H2_SENSOR_AGENT_URL"] = override_url
+
+    result, probes, _ = field_start("--robot-only", sensor_settings=settings)
+    assert result.returncode == 0, result
+    assert probes == ["15051", "15052"]
+    monitor_url, pc2_host, pc2_command, pc3_host, pc3_command = (tmp_path / "sensor-calls").read_text().splitlines()
+    assert monitor_url == "http://10.42.8.22:8090/environment"
+    assert pc2_host == "unitree@10.42.8.22"
+    assert "H2_PC2_BIND=10.42.9.22" in shlex.split(pc2_command)
+    assert pc3_host == "unitree@10.42.8.23"
+    assert f"H2_SENSOR_AGENT_URL={override_url or monitor_url}" in shlex.split(pc3_command)

@@ -1,4 +1,7 @@
 from dataclasses import replace
+from importlib.util import module_from_spec, spec_from_file_location
+from io import BytesIO
+import shlex
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -77,3 +80,38 @@ def test_reconnect_disables_ssh_connection_sharing_for_both_forwards(monkeypatch
     for command, local_port, remote_port in ((status, 15051, 50051), (teleop, 15052, 50052)):
         assert command[command.index("-S") + 1] == "none"
         assert command[command.index("-L") + 1] == f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}"
+
+
+@pytest.mark.parametrize("override_url", [None, "http://pc2-private.example:8090/environment?name='h2'&lane=pc3"])
+def test_manual_field_start_uses_configured_sensor_addresses(monkeypatch, override_url):
+    pc2_host = "10.42.8.22"
+    pc2_bind = "10.42.9.22"
+    pc3_host = "10.42.8.23"
+    monitor_url = f"http://{pc2_host}:8090/environment"
+    monkeypatch.setenv("H2_PC2_HOST", pc2_host)
+    monkeypatch.setenv("H2_PC2_BIND", pc2_bind)
+    monkeypatch.setenv("H2_PC3_HOST", pc3_host)
+    if override_url is None:
+        monkeypatch.delenv("H2_SENSOR_AGENT_URL", raising=False)
+    else:
+        monkeypatch.setenv("H2_SENSOR_AGENT_URL", override_url)
+
+    spec = spec_from_file_location("configured_field", field.__file__)
+    assert spec is not None and spec.loader is not None
+    configured = module_from_spec(spec)
+    spec.loader.exec_module(configured)
+    urlopen = Mock(return_value=BytesIO(b'{"available":true}'))
+    start = Mock()
+    monkeypatch.setattr(configured, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    monkeypatch.setattr(configured, "_ssh", Mock(side_effect=["stopped", "stopped", "2"]))
+    monkeypatch.setattr(configured, "_ssh_best_effort", start)
+    monkeypatch.setattr(configured, "time", SimpleNamespace(sleep=lambda _: None))
+
+    assert configured.start_pc2_agent() == {"ok": True, "already": False}
+    assert configured.start_pc3_gateway() == {"ok": True, "already": False}
+    urlopen.assert_called_once_with(monitor_url, timeout=2)
+    (agent, gateway) = [call.args for call in start.call_args_list]
+    assert agent[0] == pc2_host
+    assert f"H2_PC2_BIND={pc2_bind}" in shlex.split(agent[1])
+    assert gateway[0] == pc3_host
+    assert f"H2_SENSOR_AGENT_URL={override_url or monitor_url}" in shlex.split(gateway[1])

@@ -79,7 +79,7 @@ h2-inspection-platform/
 | [`sensor_agent_pc2.py`](scripts/sensor_agent_pc2.py) | 在 PC2 读取 RS-485 温湿度传感器，通过 `/environment` 提供读数、样本标识和采样年龄 |
 | [`h2_field_start.sh`](scripts/h2_field_start.sh)、[`h2_field_stop.sh`](scripts/h2_field_stop.sh) | 在上位机编排现场链路，启用 PC2 代理、PC3 网关、两条 SSH 转发和上位机服务。收工脚本停止上位机服务和转发，PC2、PC3 进程保留供复用 |
 | [`h2_field_check.py`](scripts/h2_field_check.py) | 在机器人静止时检查真机模式、运控就绪、控制权申请、心跳和释放回执 |
-| [`deploy/`](scripts/deploy/README.md) | [`setup_pc2.sh`](scripts/deploy/setup_pc2.sh) 安装传感器代理，[`setup_pc3.sh`](scripts/deploy/setup_pc3.sh) 辅助准备和检查 SDK2 环境，[`setup_workstation.sh`](scripts/deploy/setup_workstation.sh) 辅助安装上位机依赖并生成启动包装器 |
+| [`deploy/`](scripts/deploy/README.md) | [`setup_pc2.sh`](scripts/deploy/setup_pc2.sh) 安装传感器代理，[`setup_pc3.sh`](scripts/deploy/setup_pc3.sh) 安装网关和 SDK2 运行依赖，[`setup_workstation.sh`](scripts/deploy/setup_workstation.sh) 安装上位机包与锁定依赖并生成启动包装器 |
 | [`validate_live.py`](scripts/validate_live.py)、[`browser_validate.mjs`](scripts/browser_validate.mjs) | 验证本地模拟系统。前者经 HTTP 验证 PostgreSQL、gRPC、巡检和报告，后者通过浏览器验证下发、人工复核、报告入口和刷新后数据恢复 |
 | [`validate_inference.py`](scripts/validate_inference.py) | 用小型合成模型检查 OpenCV、NumPy 和 ONNX Runtime 的 CPU 推理环境 |
 
@@ -136,6 +136,8 @@ pnpm --dir frontend install --frozen-lockfile
 温湿度从 PC2 采样起最多显示 8 秒，重复轮询同一条样本不会续期。部署时同时更新 PC2 代理、PC3 网关和上位机前后端。各端用本机单调时钟判断有效期，无需同步三台设备的系统时钟。
 
 现场一键入口 `scripts/h2_field_start.sh` 负责准备 PC2、PC3 和双 SSH 转发。两条转发均通过独立进程和只读网关查询检查后，才进入上位机应用的停启步骤。转发失败会报告对应端口并保留已运行的应用。手动部署先建立两条转发，再用 `dev.py` 启动本地应用。运行中的连接恢复由操作员在链路管理区触发。
+
+换网段时从 `H2_PC2_HOST` 指定 PC2 开发网地址，上位机探测、PC2 默认监听和 PC3 默认采样共用该配置。具体覆盖方式和三端重启步骤见[部署指南](scripts/deploy/README.md#换网段与启动)。
 
 - [设计方案](robot-gateway/H2_DESIGN.md)说明遥控优先级、指令有效期和温湿度采样年龄如何传递。
 - [三端部署说明](robot-gateway/H2_COMMISSIONING.md)包含 PC2 代理、PC3 只读探测与网关、双 SSH 转发及上位机启动命令。

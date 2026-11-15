@@ -11,18 +11,25 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import subprocess
 import time
 import urllib.request
 
-PC2 = os.environ.get("H2_PC2_HOST", "192.168.124.162")
+from h2_gateway.sensor_config import DEFAULT_PC2_HOST, pc2_agent_url, pc3_sensor_agent_url
+
+
+PC2 = os.getenv("H2_PC2_HOST") or DEFAULT_PC2_HOST
 PC3 = os.environ.get("H2_PC3_HOST", "192.168.124.163")
-PC2_AGENT_URL = f"http://{PC2}:8090/environment"
+PC2_BIND = os.getenv("H2_PC2_BIND") or PC2
+PC2_AGENT_URL = pc2_agent_url(PC2)
 FORWARD_PORTS = (15051, 15052)
 
-PC2_START = "PYTHONPATH=$HOME/pylibs nohup python3 ~/sensor_agent.py > ~/sensor_agent.log 2>&1 < /dev/null &"
+PC2_START = (f"H2_PC2_BIND={shlex.quote(PC2_BIND)} PYTHONPATH=$HOME/pylibs "
+             "nohup python3 ~/sensor_agent.py > ~/sensor_agent.log 2>&1 < /dev/null &")
 PC3_START = ("cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install "
+             f"H2_SENSOR_AGENT_URL={shlex.quote(pc3_sensor_agent_url(PC2))} "
              "nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 "
              "--host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &")
 

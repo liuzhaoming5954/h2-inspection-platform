@@ -18,7 +18,6 @@ from h2_gateway.engine import SimulatorEngine
 from h2_gateway.generated import robot_gateway_pb2 as pb
 from h2_gateway.generated import robot_gateway_pb2_grpc as rpc
 from h2_gateway.hardware import (
-    DEFAULT_SENSOR_AGENT_URL,
     AgentEnvironment,
     BmsWatcher,
     H2HardwareGateway,
@@ -26,6 +25,7 @@ from h2_gateway.hardware import (
     UnitreeLoco,
     emit_event,
 )
+from h2_gateway.sensor_config import DEFAULT_PC2_HOST, pc3_sensor_agent_url
 
 
 class GatewayService(rpc.RobotGatewayServicer):
@@ -149,7 +149,7 @@ def main() -> None:
             engine = H2HardwareGateway(
                 loco,
                 AgentEnvironment(
-                    os.environ.get("H2_SENSOR_AGENT_URL", DEFAULT_SENSOR_AGENT_URL)
+                    pc3_sensor_agent_url(os.getenv("H2_PC2_HOST") or DEFAULT_PC2_HOST)
                 ).start(),
                 battery,
                 odom,
