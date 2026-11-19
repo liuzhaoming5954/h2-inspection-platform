@@ -99,12 +99,103 @@ async function pollField() {
   } catch { /* 查询失败时沿用上一次收到的状态。 */ }
 }
 
+// 视觉识别：PC2 头部相机程序的结果经后端转发。该程序约 3Hz 输出，
+// 与温湿度一致按 8 秒采样年龄判断新鲜度，超龄即提示视觉程序未运行。
+interface VisionLed { color: string; distance_mm: number; x: number; y: number }
+interface VisionStatus {
+  available: boolean
+  age_ms?: number
+  person?: number
+  led?: number
+  red?: number
+  green?: number
+  qr?: string | null
+  center_mm?: number
+  leds?: VisionLed[]
+  frame_ts?: string
+  error?: string
+}
+const visionStatus = ref<VisionStatus | null>(null)
+const visionFreshnessMs = 8000
+const visionLive = computed(() => visionStatus.value?.available === true
+  && (visionStatus.value.age_ms ?? Number.POSITIVE_INFINITY) <= visionFreshnessMs)
+
+async function pollVision() {
+  if (disposed || hardwareConfigured.value !== true) return
+  try {
+    const status = await request<VisionStatus>('/api/field/vision', { cache: 'no-store' })
+    if (!disposed && hardwareConfigured.value === true) visionStatus.value = status
+  } catch { visionStatus.value = null }
+}
+
+const visionPerson = computed(() => visionLive.value ? visionStatus.value?.person ?? 0 : null)
+const visionLedTotal = computed(() => visionLive.value ? visionStatus.value?.led ?? 0 : null)
+const visionQr = computed(() => visionLive.value ? visionStatus.value?.qr ?? null : null)
+// 卡片脚注宽度有限，未运行状态用紧凑相对时间，完整信息在 title 提示里。
+function visionAgeText(ageMs: number): string {
+  const seconds = Math.round(ageMs / 1000)
+  if (seconds < 60) return `${seconds} 秒前`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.round(minutes / 60)
+  return hours < 24 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
+}
+const visionNote = computed(() => {
+  const status = visionStatus.value
+  if (status === null) return '无法获取视觉数据'
+  if (status.available !== true) return 'PC2 视觉接口不可用'
+  if (!visionLive.value) return `视觉程序未运行 · ${visionAgeText(status.age_ms ?? 0)}`
+  const parts = [`红 ${status.red ?? 0} · 绿 ${status.green ?? 0}`]
+  parts.push(visionQr.value ? `二维码「${visionQr.value}」` : '无二维码')
+  if (status.center_mm) parts.push(`中心 ${(status.center_mm / 1000).toFixed(2)} m`)
+  return parts.join(' · ')
+})
+
+// 图像显示模块：轮询 PC2 的预览帧（带检测框 JPEG）。用对象 URL 换图，
+// 避免 <img> 的 URL 缓存；采样年龄来自 PC2 写入的响应头，无需跨机对时。
+const visionFrameUrl = ref<string | null>(null)
+const visionFrameAgeMs = ref<number | null>(null)
+let visionFrameObjectUrl: string | undefined
+
+async function pollVisionFrame() {
+  if (disposed || hardwareConfigured.value !== true) return
+  try {
+    const response = await fetch('/api/field/vision/frame', { cache: 'no-store' })
+    if (!response.ok) return  // 来源暂不可用时保留上一帧，状态由年龄提示。
+    const ageHeader = Number(response.headers.get('X-Frame-Age-Ms'))
+    const blob = await response.blob()
+    if (disposed) return
+    const next = URL.createObjectURL(blob)
+    const previous = visionFrameObjectUrl
+    visionFrameObjectUrl = next
+    visionFrameUrl.value = next
+    visionFrameAgeMs.value = Number.isFinite(ageHeader) && ageHeader >= 0 ? ageHeader : null
+    if (previous) URL.revokeObjectURL(previous)
+  } catch { /* 网络闪断时保留上一帧。 */ }
+}
+
+const visionFrameNote = computed(() => {
+  const age = visionFrameAgeMs.value
+  if (visionFrameUrl.value === null) return '等待相机画面接入'
+  if (age == null) return '机器人摄像头'
+  return age <= visionFreshnessMs
+    ? `机器人摄像头 · ${(age / 1000).toFixed(1)} 秒前`
+    : `画面停滞 · ${visionAgeText(age)}`
+})
+
 watch(hardwareConfigured, (configured, _, onCleanup) => {
   fieldStatus.value = null
+  visionStatus.value = null
   if (configured !== true) return
   void pollField()
+  void pollVision()
+  void pollVisionFrame()
   const timer = setInterval(() => { if (!fieldBusy.value) void pollField() }, 5000)
-  onCleanup(() => clearInterval(timer))
+  // 视觉数据变化快于链路状态，单独用更短的轮询周期。
+  const visionTimer = setInterval(() => { void pollVision() }, 2000)
+  // 预览帧由视觉程序按 500ms 落盘，轮询略慢于产出即可。
+  const visionFrameTimer = setInterval(() => { void pollVisionFrame() }, 700)
+  onCleanup(() => { clearInterval(timer); clearInterval(visionTimer); clearInterval(visionFrameTimer) })
 })
 
 async function fieldAction(kind: 'reconnect-forwards' | 'start-pc2' | 'start-pc3') {
@@ -332,6 +423,7 @@ onBeforeUnmount(() => {
   clearTimeout(environmentTimer)
   clearInterval(clockTimer)
   robotRequest?.abort()
+  if (visionFrameObjectUrl) URL.revokeObjectURL(visionFrameObjectUrl)
 })
 </script>
 
@@ -395,6 +487,11 @@ onBeforeUnmount(() => {
             <div class="metric-foot">{{ environmentNote }}</div>
           </div>
           <div v-if="hardwareMode" class="metric-card">
+            <div class="metric-top"><span>视觉识别</span><span class="metric-icon">◉</span></div>
+            <div class="sample-values"><strong>{{ visionPerson ?? '—' }}<span>人</span></strong><i></i><strong>{{ visionLedTotal ?? '—' }}<span>灯</span></strong></div>
+            <div class="metric-foot vision-foot" :title="visionQr ?? visionNote">{{ visionNote }}</div>
+          </div>
+          <div v-if="hardwareMode" class="metric-card">
             <div class="metric-top"><span>机器人位姿</span><span class="metric-icon">⌖</span></div>
             <div v-if="robot?.pose" class="metric-value pose-value">
               <span>x {{ robot.pose.x.toFixed(2) }}　y {{ robot.pose.y.toFixed(2) }} m</span>
@@ -421,9 +518,10 @@ onBeforeUnmount(() => {
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
-              <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">机器人摄像头</span></div>
+              <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">{{ visionFrameNote }}</span></div>
             </div>
-            <div class="monitor-placeholder">等待相机画面接入</div>
+            <img v-if="visionFrameUrl" class="camera-frame" :src="visionFrameUrl" alt="机器人摄像头实时画面（带检测框）" />
+            <div v-else class="monitor-placeholder">等待相机画面接入</div>
           </section>
         </div>
 
@@ -467,8 +565,10 @@ onBeforeUnmount(() => {
 .pose-value { display: block; font-size: 15px; line-height: 1.6; }
 .pose-value span { display: block; }
 @media (min-width: 1201px) {
-  .hardware-metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  /* 真机指标行现有六张卡片：连接、运动服务、电量、温湿度、视觉识别和位姿。 */
+  .hardware-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
+.vision-foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 主区顶部横条显示链路状态，并提供手动触发的 SSH 操作，为侧栏留出遥控空间。 */
 .field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
 .field-strip-title { color: #4e6675; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
@@ -486,6 +586,8 @@ onBeforeUnmount(() => {
 .scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
 .scene-reset:hover:not(:disabled) { border-color: #16888b; }
 .scene-reset:disabled { opacity: .5; cursor: not-allowed; }
+/* 预览帧按原始比例缩放显示，深色底与检测框画面协调。 */
+.camera-frame { display: block; width: 100%; max-height: 46vh; object-fit: contain; border-radius: 6px; background: #0d141a; }
 .monitor-placeholder {
   display: grid;
   place-items: center;

@@ -21,6 +21,8 @@ bash ~/h2-inspection-platform/scripts/deploy/setup_pc2.sh
 ```
 脚本把 `pyserial` 安装到 `~/pylibs`，把代理复制到 `~/sensor_agent.py`，并列出本机串口。串口默认 `/dev/ttyACM0`（机身接口 10 的 RS-485），如有差异，在部署前调整代理脚本顶部的 `PORT`。
 
+代理同时提供三个接口：`GET /environment` 返回温湿度采样；`GET /vision` 解析头部相机视觉程序（`ob_callback`，位于 `~/OrbbecSDK_v2.10.6_202609291004_575347c_linux_x86_64/examples/build`）追加写入的 `detect_log.txt`，返回最新一帧的人数、红绿灯、二维码和中心深度；`GET /vision/frame` 返回该程序每 500ms 原子写入 `/dev/shm/latest_annot.png` 的带检测框预览图（该机 OpenCV 未编入 JPEG 编码器，故为 PNG），响应头 `X-Frame-Age-Ms` 给出帧年龄。视觉程序支持 `OB_HEADLESS=1` 无窗口运行（SSH 常驻），界面按 8 秒采样年龄判断其是否在运行。日志与预览路径分别可用 `H2_VISION_LOG`、`H2_VISION_FRAME` 覆盖，SDK 升级导致路径变化时同步修改并重新部署。
+
 ### PC3（遥控网关）
 
 准备 Python 3.12 或更高版本、`venv` 和该版本的开发头文件、Git、CMake 3.16 或更高版本、C 编译器和构建工具。首次安装需要能下载源码和 Python 依赖。

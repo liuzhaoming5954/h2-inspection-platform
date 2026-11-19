@@ -34,6 +34,10 @@ curl --fail --show-error 'http://192.168.50.162:8090/environment'
 
 正常响应应包含 `available: true` 和 `sample`。`temperature_c`、`humidity_percent` 是原始读数，`captured_at` 是 PC2 原始采样时刻（Unix 秒），`age_seconds` 是 PC2 用单调时钟计算的采样年龄（秒）。`sample_id` 是样本标识，同一条样本被重复读取时保持不变。连续读不到有效样本时，可用 `consecutive_failures` 排查串口权限、线路及传感器配置。最后一条有效样本达到 8 秒时，代理返回 `available: false`。
 
+同一个代理还提供 `GET /vision`，解析头部相机视觉程序（`ob_callback`）写入 `~/OrbbecSDK_v2.10.6_202609291004_575347c_linux_x86_64/examples/build/detect_log.txt` 的最新一帧，返回 `person`、红绿灯计数与明细（`leds`，含颜色、距离和像素坐标）、`qr` 和 `center_mm`。`age_ms` 是 PC2 按帧时间戳计算的采样年龄；视觉程序停止后超过 8 秒无新帧即视为未运行。上位机真机界面的「视觉识别」卡片经 `/api/field/vision`（2 秒轮询）展示该结果。
+
+视觉程序还把带检测框的预览帧每 500ms 原子写入 `/dev/shm/latest_annot.png`（经 `GET /vision/frame` 提供，`X-Frame-Age-Ms` 为帧年龄），上位机「图像显示」模块经 `/api/field/vision/frame` 以约 1.4Hz 刷新显示。预览只影响传输拷贝（960 宽等比缩放），检测仍用原始分辨率。视觉程序可在 PC2 上以无窗口方式常驻：`cd ~/OrbbecSDK_2.10.6.../examples/build && OB_HEADLESS=1 nohup ./bin/ob_callback > ob_headless.log 2>&1 &`，退出用 `kill`；调参时从 NoMachine 桌面按原方式启动即可（两种模式输出完全一致）。
+
 ## 3. 准备 PC3
 
 确认 PC3 的系统和架构，准备 Python 3.12 或更高版本及对应的 `venv` 和开发头文件、C 编译器、CMake 3.16 或更高版本、构建工具和 Git。在 PC3 的仓库根目录执行安装脚本。

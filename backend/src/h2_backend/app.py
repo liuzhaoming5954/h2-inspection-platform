@@ -5,7 +5,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from . import field
@@ -139,6 +139,23 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
             return field.start_pc3_gateway()
         except Exception as error:
             return {"ok": False, "error": str(error)[:200]}
+
+    @field_routes.get("/vision")
+    def field_vision():
+        # 视觉接口自身已经把不可达折叠为 available=False，这里不再包错。
+        return field.vision()
+
+    @field_routes.get("/vision/frame")
+    def field_vision_frame():
+        frame = field.vision_frame()
+        if frame is None:
+            # 预览帧尚不存在（视觉程序未运行或 PC2 离线），保留 503 语义供前端识别。
+            raise ServiceError(503, "预览帧不可用（视觉程序未运行或 PC2 离线）")
+        data, age_ms, content_type = frame
+        headers = {"Cache-Control": "no-store"}
+        if age_ms is not None:
+            headers["X-Frame-Age-Ms"] = str(age_ms)
+        return Response(content=data, media_type=content_type, headers=headers)
 
     if settings.hardware_teleop:
         app.include_router(field_routes)

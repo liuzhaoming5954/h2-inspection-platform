@@ -1,9 +1,10 @@
 from dataclasses import replace
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
+import json
 import shlex
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 from fastapi.testclient import TestClient
 import pytest
@@ -14,6 +15,7 @@ from h2_backend.app import create_app
 
 FIELD_ROUTES = (
     ("GET", "/api/field/status", "status"),
+    ("GET", "/api/field/vision", "vision"),
     ("POST", "/api/field/reconnect-forwards", "reconnect_forwards"),
     ("POST", "/api/field/start-pc2", "start_pc2_agent"),
     ("POST", "/api/field/start-pc3", "start_pc3_gateway"),
@@ -50,8 +52,90 @@ def test_hardware_field_routes_delegate_operations(settings, gateway, field_hand
             assert response.json() == {"action": name}
 
     field_handlers["status"].assert_called_once_with(True)
-    for name in ("reconnect_forwards", "start_pc2_agent", "start_pc3_gateway"):
+    for name in ("vision", "reconnect_forwards", "start_pc2_agent", "start_pc3_gateway"):
         field_handlers[name].assert_called_once_with()
+
+
+def test_vision_forwards_latest_pc2_frame(monkeypatch):
+    payload = {"available": True, "person": 2, "led": 1, "red": 0, "green": 1,
+               "qr": "机房 A 巡检点 3", "center_mm": 1967, "age_ms": 120, "leds": []}
+    urlopen = Mock(return_value=BytesIO(json.dumps(payload).encode()))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+
+    assert field.vision() == payload
+    urlopen.assert_called_once_with(f"http://{field.PC2}:8090/vision", timeout=2)
+
+
+def test_vision_folds_unreachable_pc2_and_non_object_payload(monkeypatch):
+    urlopen = Mock(side_effect=OSError("connection refused"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    result = field.vision()
+    assert result["available"] is False
+    assert "refused" in result["error"]
+
+    urlopen = Mock(return_value=BytesIO(b"[1, 2]"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.vision() == {"available": False, "error": "视觉代理返回了非对象响应"}
+
+
+def _frame_response(payload: bytes, age_header: str | None, content_type: str = "image/png") -> MagicMock:
+    # 模拟 PC2 /vision/frame 的二进制响应：上下文管理器 + headers 字典。
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = payload
+    response.headers = {"Content-Type": content_type}
+    if age_header is not None:
+        response.headers["X-Frame-Age-Ms"] = age_header
+    return response
+
+
+def test_vision_frame_forwards_png_and_age_header(monkeypatch):
+    urlopen = MagicMock(return_value=_frame_response(b"\x89PNG-frame", "120"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+
+    assert field.vision_frame() == (b"\x89PNG-frame", 120, "image/png")
+    urlopen.assert_called_once_with(f"http://{field.PC2}:8090/vision/frame", timeout=2)
+
+    # 年龄头缺失时返回 None 年龄而不是报错。
+    urlopen = MagicMock(return_value=_frame_response(b"\x89PNG-frame", None))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.vision_frame() == (b"\x89PNG-frame", None, "image/png")
+
+
+def test_vision_frame_falls_back_to_magic_bytes_for_content_type(monkeypatch):
+    # PC2 未声明类型时按文件魔数兜底，避免 PNG 被标成 jpeg。
+    urlopen = MagicMock(return_value=_frame_response(b"\x89PNG-frame", "40", content_type=""))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.vision_frame()[2] == "image/png"
+
+    urlopen = MagicMock(return_value=_frame_response(b"\xff\xd8jpeg", "40", content_type=None))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.vision_frame()[2] == "image/jpeg"
+
+
+def test_vision_frame_folds_unreachable_pc2(monkeypatch):
+    urlopen = MagicMock(side_effect=OSError("connection refused"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.vision_frame() is None
+
+
+def test_hardware_vision_frame_route_serves_png(settings, gateway, monkeypatch):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    monkeypatch.setattr(field, "vision_frame", lambda: (b"\x89PNG-frame", 120, "image/png"))
+    with TestClient(hardware_app) as client:
+        response = client.get("/api/field/vision/frame")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["X-Frame-Age-Ms"] == "120"
+    assert response.content == b"\x89PNG-frame"
+
+
+def test_hardware_vision_frame_route_reports_unavailable(settings, gateway, monkeypatch):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    monkeypatch.setattr(field, "vision_frame", lambda: None)
+    with TestClient(hardware_app) as client:
+        response = client.get("/api/field/vision/frame")
+    assert response.status_code == 503
 
 
 def test_reconnect_requires_credentials_before_terminating_forwards(monkeypatch):

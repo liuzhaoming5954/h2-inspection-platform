@@ -17,7 +17,8 @@ import subprocess
 import time
 import urllib.request
 
-from h2_gateway.sensor_config import DEFAULT_PC2_HOST, pc2_agent_url, pc3_sensor_agent_url
+from h2_gateway.sensor_config import (DEFAULT_PC2_HOST, pc2_agent_url, pc2_vision_frame_url,
+                                       pc2_vision_url, pc3_sensor_agent_url)
 
 
 PC2 = os.getenv("H2_PC2_HOST") or DEFAULT_PC2_HOST
@@ -73,6 +74,46 @@ def probe_pc2() -> bool:
         return payload.get("available") is True
     except Exception:
         return False
+
+
+def vision() -> dict:
+    """转发 PC2 /vision 的最新一帧识别结果，供真机界面展示。
+
+    PC2 不可达或返回异常时回 available=False，界面据此区分
+    「PC2 离线」和「视觉程序未运行」（available 但 age_ms 过大）。
+    该接口只读，不触发任何远程操作。
+    """
+    try:
+        with urllib.request.urlopen(pc2_vision_url(PC2), timeout=2) as response:
+            payload = json.load(response)
+    except Exception as error:
+        return {"available": False, "error": str(error)[:120]}
+    if not isinstance(payload, dict):
+        return {"available": False, "error": "视觉代理返回了非对象响应"}
+    return payload
+
+
+def vision_frame() -> tuple[bytes, int | None, str] | None:
+    """转发 PC2 /vision/frame 的最新预览帧，返回 (图像字节, 采样年龄毫秒, Content-Type)。
+
+    PC2 不可达或尚无帧时返回 None，由路由折成 503，
+    界面据此保留上一帧并提示画面来源离线。
+    """
+    try:
+        with urllib.request.urlopen(pc2_vision_frame_url(PC2), timeout=2) as response:
+            data = response.read()
+            age_header = response.headers.get("X-Frame-Age-Ms")
+            content_type = response.headers.get("Content-Type")
+    except Exception:
+        return None
+    if not data:
+        return None
+    # 年龄头由 PC2 写入，缺失时返回 None，界面不显示年龄而不是显示错误值。
+    age_ms = int(age_header) if age_header is not None and age_header.lstrip("-").isdigit() else None
+    # 类型以 PC2 声明为准，缺失或异常时按文件魔数兜底，保证前端拿到正确 MIME。
+    if not isinstance(content_type, str) or not content_type.startswith("image/"):
+        content_type = "image/png" if data.startswith(b"\x89PNG") else "image/jpeg"
+    return data, age_ms, content_type
 
 
 def port_listening(port: int) -> bool:

@@ -6,12 +6,25 @@ GET /environment 仅在机器人外部开发网段提供服务。
 读取失败时仍返回上一次有效采样，直到该采样过期，此后报告不可用。
 Modbus 逻辑移植自经过现场验证的 read_sensor.py。
 使用 Modbus-RTU 9600 8N1，从站地址 0x01，湿度寄存器 0x0000，温度寄存器 0x0001，读数除以 10。
+
+GET /vision 转发头部相机视觉程序（ob_callback，OrbbecSDK 示例改造）的识别结果。
+该程序把每帧结果追加写入 detect_log.txt，本接口按需读取日志尾部并解析最新一帧，
+返回人数、红绿灯、二维码和中心深度。available 只表示日志可读且解析出过帧，
+数据是否新鲜由 age_ms 判断，读取端按采样年龄决定显示或提示视觉程序未运行。
+日志路径可用 H2_VISION_LOG 覆盖。
+
+GET /vision/frame 返回最新一帧带检测框的预览图（按扩展名给 Content-Type，
+视觉程序用 PNG——该机 OpenCV 未编入 JPEG 编码器），
+响应头 X-Frame-Age-Ms 给出该帧的采样年龄（毫秒），无帧时返回 503。
+预览文件路径可用 H2_VISION_FRAME 覆盖。
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
+import re
 import struct
 import threading
 import time
@@ -28,6 +41,25 @@ FRESH_SECONDS = 8.0
 FUNC_READ_HOLDING = 0x03
 REG_HUMIDITY = 0x0000
 TIMEOUT = 1.0
+
+# 视觉程序在 PC2 上的输出日志。路径含 SDK 版本号，升级 SDK 后用 H2_VISION_LOG 覆盖，
+# 或直接修改此默认值并重新部署本代理。
+VISION_LOG = os.getenv("H2_VISION_LOG") or (
+    "/home/unitree/OrbbecSDK_v2.10.6_202609291004_575347c_linux_x86_64"
+    "/examples/build/detect_log.txt")
+# 程序约 3Hz 追加一帧，每次请求只读日志末尾一段即可拿到最新帧；
+# 日志轮转（截断重写）也无影响，因为不做增量状态跟踪。
+VISION_TAIL_BYTES = 65536
+# 帧汇总行，例如：
+# [2026-11-18 16:56:03.592] person=0 led=1 red=1 green=0 qr=none center=1967mm
+FRAME_LINE = re.compile(
+    r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\] "
+    r"person=(\d+) led=(\d+) red=(\d+) green=(\d+) qr=(.*?) center=(\d+)mm\s*$")
+# 帧内缩进的灯明细行，例如：    LED Red 734mm @(792,610)
+LED_LINE = re.compile(r"^\s+LED (\w+) (\d+)mm @\((\d+),(\d+)\)\s*$")
+# 预览帧文件：视觉程序每 500ms 原子写入（先写临时文件再 rename）的带检测框 PNG。
+# /dev/shm 是内存盘，程序停止后文件会残留，是否在线由采样年龄判断。
+VISION_FRAME = os.getenv("H2_VISION_FRAME") or "/dev/shm/latest_annot.png"
 
 
 def crc16(data: bytes) -> int:
@@ -116,13 +148,105 @@ def poll_loop() -> None:
             time.sleep(POLL_SECONDS)
 
 
+def parse_vision_tail(text: str) -> dict | None:
+    """解析日志尾部文本，返回最新一帧的识别结果，无帧时返回 None。
+
+    帧汇总行自带 person/led/red/green/qr/center 全部字段，遇到下一帧汇总行
+    即说明上一帧完整；缩进的 LED 明细行归属其前方最近的帧。
+    其余行（程序启停标记、参数回显等）全部忽略。
+    """
+    latest: dict | None = None
+    for line in text.splitlines():
+        frame = FRAME_LINE.match(line)
+        if frame:
+            ts, person, led, red, green, qr, center = frame.groups()
+            latest = {
+                "frame_ts": ts,
+                "person": int(person),
+                "led": int(led),
+                "red": int(red),
+                "green": int(green),
+                # 日志用字面量 none 表示本帧没有二维码，空串同样按无处理。
+                "qr": None if qr in ("none", "") else qr,
+                "center_mm": int(center),
+                "leds": [],
+            }
+            continue
+        detail = LED_LINE.match(line)
+        if detail and latest is not None:
+            color, distance, x, y = detail.groups()
+            latest["leds"].append({"color": color.lower(), "distance_mm": int(distance),
+                                   "x": int(x), "y": int(y)})
+    return latest
+
+
+def vision_snapshot() -> dict:
+    """读取视觉日志末尾并返回 /vision 响应。
+
+    帧时间戳是视觉程序在 PC2 本机写的墙上时钟，与本接口在同一台机器
+    读取，直接相减得到采样年龄，不引入跨机时钟同步。
+    """
+    try:
+        with open(VISION_LOG, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            size = log.tell()
+            log.seek(max(0, size - VISION_TAIL_BYTES))
+            text = log.read().decode("utf-8", errors="replace")
+    except OSError as error:
+        return {"available": False, "error": f"视觉日志不可读：{error}"[:160]}
+    latest = parse_vision_tail(text)
+    if latest is None:
+        return {"available": False, "error": "视觉日志中没有可解析的帧"}
+    try:
+        frame_epoch = datetime.strptime(latest["frame_ts"], "%Y-%m-%d %H:%M:%S.%f").timestamp()
+    except ValueError as error:
+        return {"available": False, "error": f"帧时间戳无法解析：{error}"[:160]}
+    return {"available": True, **latest, "age_ms": int(max(0.0, time.time() - frame_epoch) * 1000)}
+
+
+def vision_frame() -> tuple[bytes, int] | None:
+    """读取最新预览帧，返回 (JPEG 字节, 采样年龄毫秒)，无帧时返回 None。
+
+    写方先写临时文件再 rename，读到的一定是完整一帧；程序停止后
+    内存盘上的残留文件由采样年龄暴露，读取端据此提示画面停滞。
+    """
+    try:
+        stat = os.stat(VISION_FRAME)
+        with open(VISION_FRAME, "rb") as frame:
+            data = frame.read()
+    except OSError:
+        return None
+    return data, int(max(0.0, time.time() - stat.st_mtime) * 1000)
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - 沿用标准库的方法命名
-        if self.path != "/environment":
+        if self.path == "/environment":
+            self._respond_json(LATEST.snapshot())
+        elif self.path == "/vision":
+            self._respond_json(vision_snapshot())
+        elif self.path == "/vision/frame":
+            frame = vision_frame()
+            if frame is None:
+                self._respond_json({"available": False, "error": "预览帧尚未生成"}, status=503)
+                return
+            data, age_ms = frame
+            # 视觉程序按 imwrite 可用编码器输出 PNG；按扩展名声明类型即可。
+            content_type = "image/png" if VISION_FRAME.endswith(".png") else "image/jpeg"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            # 采样年龄放响应头，读取端无需再对时。
+            self.send_header("X-Frame-Age-Ms", str(age_ms))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        else:
             self.send_error(404)
-            return
-        body = json.dumps(LATEST.snapshot()).encode()
-        self.send_response(200)
+
+    def _respond_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
