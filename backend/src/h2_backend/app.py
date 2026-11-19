@@ -157,6 +157,18 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
             headers["X-Frame-Age-Ms"] = str(age_ms)
         return Response(content=data, media_type=content_type, headers=headers)
 
+    @field_routes.get("/map/{kind}")
+    def field_map(kind: str):
+        # 建图桥数据转发（点云/位姿/轨迹），供「地图显示」模块轮询。
+        if kind not in ("map", "pose", "path"):
+            raise ServiceError(404, "未知的地图数据类型")
+        payload = field.map_data(kind)
+        if payload is None:
+            raise ServiceError(503, "地图数据不可用（建图未运行或 PC3 离线）")
+        data, content_type, extra = payload
+        return Response(content=data, media_type=content_type,
+                        headers={"Cache-Control": "no-store", **extra})
+
     if settings.hardware_teleop:
         app.include_router(field_routes)
 

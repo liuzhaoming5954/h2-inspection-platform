@@ -1,0 +1,9 @@
+<launch>
+    <!-- H2 建图（headless）：只启动雷达驱动 + FastLIO 建图节点。
+         与 fastlio/mapping.launch 的区别：不启动 rviz 与 octomap，
+         供无显示环境常驻使用；其余行为与原 launch 一致。 -->
+    <include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch">
+    </include>
+    <rosparam command="load" file="$(find fastlio)/config/mapping.yaml"/>
+    <node pkg="fastlio" type="map_builder_node" name="map_builder_node" output="screen"/>
+</launch>

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
+import MapPanel from './components/MapPanel.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
 import TeleopPanel from './components/TeleopPanel.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
@@ -510,9 +511,9 @@ onBeforeUnmount(() => {
         <div v-if="modeKnown" class="workspace-grid" :class="{ 'hardware-workspace': hardwareMode }">
           <section v-if="hardwareMode" class="panel hardware-map" aria-labelledby="hardware-map-heading">
             <div class="panel-heading">
-              <div><h2 id="hardware-map-heading">地图显示</h2><span class="panel-caption">现场地图与机器人位姿</span></div>
+              <div><h2 id="hardware-map-heading">地图显示</h2><span class="panel-caption">FastLIO 实时建图 · 现场点云与机器人位姿</span></div>
             </div>
-            <div class="monitor-placeholder map-placeholder">等待地图数据接入</div>
+            <MapPanel />
           </section>
           <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? (poseAnchor ? '三维位姿 · 视图原点已重置' : '三维位姿 · 开机点坐标系（重启归零）') : '三维位姿与任务路线' }}</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span><button v-if="hardwareMode" class="scene-reset" type="button" :disabled="!robot?.pose" data-testid="scene-reset" @click="resetViewAnchor">{{ poseAnchor ? '再次重置' : '重置视图' }}</button></span></div><RoomScene :robot="displayRobot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span v-if="poseAnchor">视图原点已重置（当前位置 = 场景中心）· 视图坐标 {{ displayRobot?.pose ? displayRobot.pose.x.toFixed(2) + ', ' + displayRobot.pose.y.toFixed(2) + ' m' : '—' }}</span><span v-else>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />

@@ -116,6 +116,26 @@ def vision_frame() -> tuple[bytes, int | None, str] | None:
     return data, age_ms, content_type
 
 
+def map_data(kind: str) -> tuple[bytes, str, dict[str, str]] | None:
+    """转发 PC3 建图桥（h2_map_bridge，容器 host 网络 :8097）的数据。
+
+    kind 对应桥侧 /map（降采样点云，二进制 int16 三元组）、/pose（JSON 位姿）
+    和 /path（轨迹折线）。桥未随建图启动或 PC3 不可达时返回 None，
+    由路由折成 503。点云单帧可达 MB 级，超时放宽到 5 秒。
+    """
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8097/{kind}", timeout=5) as response:
+            data = response.read()
+            content_type = response.headers.get("Content-Type") or "application/octet-stream"
+            extra = {key: value for key, value in response.headers.items()
+                     if key.startswith("X-Map-")}
+    except Exception:
+        return None
+    if not data:
+        return None
+    return data, content_type, extra
+
+
 def port_listening(port: int) -> bool:
     with socket.socket() as sock:
         sock.settimeout(0.3)

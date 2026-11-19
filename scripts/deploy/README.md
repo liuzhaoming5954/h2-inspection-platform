@@ -43,6 +43,10 @@ bash scripts/deploy/setup_workstation.sh
 
 脚本使用项目的 Python 锁定依赖和前端锁文件，安装本仓库的 `h2_backend` 和 `h2_gateway`，检查 Python 依赖和模块导入后生成 `~/h2-start.sh`。启动脚本继承当前终端的配置。
 
+### PC3 建图（FastLIO2 容器）
+
+PC3 另运行 noetic 容器做 FastLIO2 实时建图（只建图不导航，对 `~/fastlio2_ros1_g1` 源码零改动），点云/位姿/轨迹经 PC3:8097 数据桥供上位机「地图显示」模块渲染。镜像构建、离线部署、启动命令与排障见 [scripts/fastlio/README.md](../fastlio/README.md)。
+
 ## 换网段与启动
 
 以下以 PC2 为 `192.168.50.162`、PC3 为 `192.168.50.163` 为例。在**上位机**终端按现场实际地址设置后启动。一键脚本会将 PC2 的监听配置传给 PC2，将采样地址传给 PC3。

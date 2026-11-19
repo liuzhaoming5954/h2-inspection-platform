@@ -138,6 +138,44 @@ def test_hardware_vision_frame_route_reports_unavailable(settings, gateway, monk
     assert response.status_code == 503
 
 
+def _map_response(payload: bytes, headers: dict) -> MagicMock:
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = payload
+    response.headers = headers
+    return response
+
+
+def test_map_data_forwards_binary_and_bridge_headers(monkeypatch):
+    headers = {"Content-Type": "application/octet-stream",
+               "X-Map-Points": "1234", "X-Map-Voxel": "0.050", "X-Map-Age-Ms": "300"}
+    urlopen = MagicMock(return_value=_map_response(b"\x01\x02", headers))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+
+    assert field.map_data("map") == (b"\x01\x02", "application/octet-stream",
+                                     {"X-Map-Points": "1234", "X-Map-Voxel": "0.050", "X-Map-Age-Ms": "300"})
+    urlopen.assert_called_once_with(f"http://{field.PC3}:8097/map", timeout=5)
+
+
+def test_map_data_folds_unreachable_bridge(monkeypatch):
+    urlopen = MagicMock(side_effect=OSError("connection refused"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.map_data("pose") is None
+
+
+def test_hardware_map_route_serves_bridge_payload(settings, gateway, monkeypatch):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    monkeypatch.setattr(field, "map_data", lambda kind: (
+        (b"cloud", "application/octet-stream", {"X-Map-Points": "9"}) if kind == "map" else None))
+    with TestClient(hardware_app) as client:
+        ok = client.get("/api/field/map/map")
+        assert ok.status_code == 200
+        assert ok.headers["X-Map-Points"] == "9"
+        assert ok.content == b"cloud"
+        assert client.get("/api/field/map/path").status_code == 503
+        assert client.get("/api/field/map/bogus").status_code == 404
+
+
 def test_reconnect_requires_credentials_before_terminating_forwards(monkeypatch):
     process = Mock()
     monkeypatch.delenv("H2_FIELD_PASSWORD", raising=False)
