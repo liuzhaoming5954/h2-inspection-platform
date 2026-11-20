@@ -40,10 +40,13 @@ PC2_VISION_DIR = "~/OrbbecSDK_v2.10.6_202609291004_575347c_linux_x86_64/examples
 PC2_VISION_START = (f"cd {PC2_VISION_DIR} && OB_HEADLESS=1 nohup ./bin/ob_callback"
                     " > ob_headless.log 2>&1 < /dev/null &")
 PC3_ROS_ENV = "source /opt/ros/noetic/setup.bash && source /workspace/G1Nav2D/devel/setup.bash"
+# 语音识别服务（PC3 本地闭环：reSpeaker 采集 + Qwen3-ASR 转写，模型常驻）
+PC3_ASR_START = ("cd ~/h2-asr && nohup ~/qwen3-asr-env/bin/python asr_service.py"
+                 " > asr_service.log 2>&1 < /dev/null &")
 
-# 数据接入阀门：只存在于后端进程内存，重启回到默认全开
-#（开是工作常态，关是临时操作，重启后不保留关闭意图）。
-DATA_VALVES = {"vision": True, "mapping": True}
+# 数据接入阀门：只存在于后端进程内存。相机/雷达默认开（显示是常态），
+# 语音默认关（主动使用型功能，开机不自动采音），重启回到此默认。
+DATA_VALVES = {"vision": True, "mapping": True, "asr": False}
 
 
 class FieldError(RuntimeError):
@@ -169,6 +172,7 @@ def status(gateway_connected: bool) -> dict:
         "forwards": forwards,
         "gateway": gateway_connected and all(forwards.values()),
         "map_ready": map_bridge_ready(),
+        "asr_ready": asr_ready(),
         "valves": dict(DATA_VALVES),
     }
 
@@ -227,6 +231,45 @@ def map_bridge_ready() -> bool:
             return response.status == 200
     except Exception:
         return False
+
+
+def asr_ready() -> bool:
+    """语音服务就绪：PC3 上 ASR 服务进程在跑（模型常驻，与是否采音无关）。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8098/health", timeout=1.5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def _asr_post(path: str) -> dict:
+    request = urllib.request.Request(f"http://{PC3}:8098{path}", method="POST")
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.load(response)
+
+
+def asr_text(since: int = 0) -> dict | None:
+    """转发 ASR 服务的增量转写结果；服务不可达返回 None。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8098/asr/text?since={since}",
+                                    timeout=2) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def start_pc3_asr() -> dict:
+    """启动 PC3 语音识别服务（模型常驻），幂等。"""
+    running = _ssh(PC3, 'pgrep -f "[a]sr_service.py" >/dev/null && echo running || echo stopped')
+    if running != "running":
+        _ssh_best_effort(PC3, PC3_ASR_START)
+    # 模型加载实测约 5 秒，留足余量
+    for _ in range(10):
+        time.sleep(1.5)
+        if asr_ready():
+            break
+    return {"ok": asr_ready(), "already": running == "running"}
 
 
 def start_pc2_vision() -> dict:
@@ -297,13 +340,27 @@ def start_pc3_mapping() -> dict:
 
 def set_data_valve(name: str, enabled: bool) -> dict:
     """切换数据接入阀门。开阀时若上游程序未运行则顺带拉起；
-    关阀只动阀门，从不停止程序。"""
+    关阀只动阀门，从不停止程序。语音额外控制服务内的采音开关。"""
     if name not in DATA_VALVES:
         raise FieldError(f"未知的数据阀门：{name}")
     if not enabled:
+        if name == "asr":
+            # 停采音但不杀模型进程；服务不在时停无可停，阀门照关
+            try:
+                _asr_post("/asr/stop")
+            except Exception:
+                pass
         DATA_VALVES[name] = False
         return {"ok": True, "enabled": False}
     DATA_VALVES[name] = True
+    if name == "asr":
+        result = start_pc3_asr()
+        try:
+            _asr_post("/asr/start")
+        except Exception as error:
+            return {"ok": False, "enabled": True, "error": f"采音启动失败：{error}"}
+        result["enabled"] = True
+        return result
     starter = {"vision": start_pc2_vision, "mapping": start_pc3_mapping}[name]
     result = starter()
     result["enabled"] = True

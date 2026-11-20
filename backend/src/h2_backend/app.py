@@ -187,6 +187,16 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
         except Exception as error:
             return {"ok": False, "enabled": False, "error": str(error)[:200]}
 
+    @field_routes.get("/asr/text")
+    def field_asr_text(since: int = 0):
+        # 转写结果增量拉取；阀门关闭时不返回历史，避免绕过关闭语义。
+        if not field.DATA_VALVES.get("asr", False):
+            raise ServiceError(503, "语音识别已关闭")
+        payload = field.asr_text(since)
+        if payload is None:
+            raise ServiceError(503, "语音服务不可用（未运行或 PC3 离线）")
+        return payload
+
     if settings.hardware_teleop:
         app.include_router(field_routes)
 

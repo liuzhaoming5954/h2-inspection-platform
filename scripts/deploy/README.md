@@ -47,6 +47,10 @@ bash scripts/deploy/setup_workstation.sh
 
 PC3 另运行 noetic 容器做 FastLIO2 实时建图（只建图不导航，对 `~/fastlio2_ros1_g1` 源码零改动），点云/位姿/轨迹经 PC3:8097 数据桥供上位机「地图显示」模块渲染。镜像构建、离线部署、启动命令与排障见 [scripts/fastlio/README.md](../fastlio/README.md)。
 
+### PC3 语音识别（Qwen3-ASR）
+
+PC3 `~/h2-asr/` 的语音服务（reSpeaker 四麦阵列 → Qwen3-ASR 本地转写 → :8098），上位机「语音识别」面板的开关首次开阀自动拉起，之后只控采音。麦克风双路语义与 VAD 标定见 [scripts/asr/README.md](../asr/README.md)。
+
 ## 换网段与启动
 
 以下以 PC2 为 `192.168.50.162`、PC3 为 `192.168.50.163` 为例。在**上位机**终端按现场实际地址设置后启动。一键脚本会将 PC2 的监听配置传给 PC2，将采样地址传给 PC3。

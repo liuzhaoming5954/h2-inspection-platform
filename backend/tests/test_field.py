@@ -179,7 +179,54 @@ def test_hardware_map_route_serves_bridge_payload(settings, gateway, monkeypatch
 @pytest.fixture
 def valves_default(monkeypatch):
     """恢复阀门初始状态，避免用例间相互污染。"""
-    monkeypatch.setattr(field, "DATA_VALVES", {"vision": True, "mapping": True})
+    monkeypatch.setattr(field, "DATA_VALVES",
+                        {"vision": True, "mapping": True, "asr": False})
+
+
+def test_asr_valve_close_stops_capture_and_keeps_service(monkeypatch, valves_default):
+    stop = Mock(return_value={"ok": True})
+    monkeypatch.setattr(field, "_asr_post", stop)
+    result = field.set_data_valve("asr", False)
+    assert result == {"ok": True, "enabled": False}
+    stop.assert_called_once_with("/asr/stop")
+    assert field.DATA_VALVES["asr"] is False
+
+
+def test_asr_valve_open_pulls_service_and_starts_capture(monkeypatch, valves_default):
+    posts = []
+    monkeypatch.setattr(field, "_asr_post",
+                        lambda path: posts.append(path) or {"ok": True})
+    monkeypatch.setattr(field, "start_pc3_asr", Mock(return_value={"ok": True, "already": False}))
+    result = field.set_data_valve("asr", True)
+    assert result == {"ok": True, "already": False, "enabled": True}
+    assert posts == ["/asr/start"]
+    assert field.DATA_VALVES["asr"] is True
+
+
+def test_asr_text_forwards_and_folds(monkeypatch):
+    urlopen = MagicMock(return_value=BytesIO(json.dumps(
+        {"items": [{"id": 3, "ts": 1.0, "text": "你好"}], "last_id": 3}).encode()))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.asr_text(2)["last_id"] == 3
+    urlopen.assert_called_once_with("http://192.168.124.163:8098/asr/text?since=2", timeout=2)
+
+    urlopen = MagicMock(side_effect=OSError("refused"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.asr_text() is None
+
+
+def test_asr_text_route_gated_by_valve(settings, gateway, monkeypatch, valves_default):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    monkeypatch.setattr(field, "asr_text", Mock(return_value={"items": [], "last_id": 0}))
+    with TestClient(hardware_app) as client:
+        # 默认关：503 且不触达 PC3
+        assert "已关闭" in client.get("/api/field/asr/text").json()["detail"]
+        field.asr_text.assert_not_called()
+        # 开阀后正常转发
+        monkeypatch.setattr(field, "DATA_VALVES", {"vision": True, "mapping": True, "asr": True})
+        ok = client.get("/api/field/asr/text?since=5")
+        assert ok.status_code == 200 and ok.json() == {"items": [], "last_id": 0}
+        field.asr_text.assert_called_once_with(5)
 
 
 def test_data_valve_close_gates_data_and_keeps_services(settings, gateway, monkeypatch, valves_default):

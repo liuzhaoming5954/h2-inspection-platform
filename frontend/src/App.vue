@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
 import MapPanel from './components/MapPanel.vue'
@@ -87,15 +87,16 @@ function resetViewAnchor() {
 
 // 链路管理区用指示灯显示各环节状态。
 // 每个按钮在操作员点击后执行对应操作，连接恢复也由操作员触发。
-interface FieldStatus { pc2_agent: boolean; vision_ready?: boolean; map_ready?: boolean; forwards: Record<string, boolean>; gateway: boolean; valves?: { vision?: boolean; mapping?: boolean } }
+interface FieldStatus { pc2_agent: boolean; vision_ready?: boolean; map_ready?: boolean; asr_ready?: boolean; forwards: Record<string, boolean>; gateway: boolean; valves?: { vision?: boolean; mapping?: boolean; asr?: boolean } }
 const fieldStatus = ref<FieldStatus | null>(null)
 const fieldBusy = ref('')
 const fieldMessage = ref('')
 
 // 数据接入阀门：开=确保上游程序在跑并接入数据；关=只断数据，程序保持运行。
-// 状态以后端为准，状态轮询纠偏，点击立即本地生效。
+// 状态以后端为准，状态轮询纠偏，点击立即本地生效。语音默认关（主动使用型）。
 const visionValve = ref(true)
 const mappingValve = ref(true)
+const asrValve = ref(false)
 
 async function pollField() {
   if (disposed || hardwareConfigured.value !== true) return
@@ -106,14 +107,15 @@ async function pollField() {
       if (status.valves) {
         visionValve.value = status.valves.vision !== false
         mappingValve.value = status.valves.mapping !== false
+        asrValve.value = status.valves.asr === true
       }
     }
   } catch { /* 查询失败时沿用上一次收到的状态。 */ }
 }
 
-async function toggleDataValve(kind: 'vision' | 'mapping') {
+async function toggleDataValve(kind: 'vision' | 'mapping' | 'asr') {
   if (hardwareConfigured.value !== true || fieldBusy.value) return
-  const enabled = kind === 'vision' ? !visionValve.value : !mappingValve.value
+  const enabled = kind === 'vision' ? !visionValve.value : kind === 'mapping' ? !mappingValve.value : !asrValve.value
   fieldBusy.value = `data-${kind}`
   fieldMessage.value = ''
   try {
@@ -122,10 +124,17 @@ async function toggleDataValve(kind: 'vision' | 'mapping') {
       `/api/field/data/${kind}`,
       { method: 'POST', body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(45_000) })
     if (kind === 'vision') visionValve.value = result.enabled !== false
-    else mappingValve.value = result.enabled !== false
+    else if (kind === 'mapping') mappingValve.value = result.enabled !== false
+    else asrValve.value = result.enabled !== false
     if (!result.ok) fieldMessage.value = `失败：${result.error ?? '上游未就绪'}`
-    else if (result.enabled === false) fieldMessage.value = kind === 'vision' ? '相机数据已关闭（程序保持运行）' : '雷达数据已关闭（程序保持运行）'
-    else fieldMessage.value = result.already ? '程序已在运行，数据已接入' : '程序已拉起，数据已接入'
+    else if (result.enabled === false) {
+      const label = kind === 'vision' ? '相机数据' : kind === 'mapping' ? '雷达数据' : '语音识别'
+      fieldMessage.value = `${label}已关闭（服务保持运行）`
+    } else {
+      fieldMessage.value = kind === 'asr'
+        ? (result.already ? '服务已在运行，已恢复采音' : '服务已拉起，开始采音')
+        : (result.already ? '程序已在运行，数据已接入' : '程序已拉起，数据已接入')
+    }
   } catch (error) {
     fieldMessage.value = `失败：${errorMessage(error)}`
   } finally {
@@ -220,6 +229,37 @@ const visionFrameNote = computed(() => {
     : `画面停滞 · ${visionAgeText(age)}`
 })
 
+// 语音识别：阀门开时增量拉取转写文本（机器人麦克风 → PC3 本地转写）
+interface AsrItem { id: number; ts: number; text: string }
+const asrItems = ref<AsrItem[]>([])
+let asrLastId = 0
+const asrLogEl = ref<HTMLDivElement>()
+
+async function pollAsrText() {
+  if (disposed || hardwareConfigured.value !== true || !asrValve.value) return
+  try {
+    const payload = await request<{ items: AsrItem[]; last_id: number }>(
+      `/api/field/asr/text?since=${asrLastId}`, { cache: 'no-store' })
+    if (disposed || !asrValve.value) return
+    if (payload.items.length) {
+      asrItems.value = [...asrItems.value, ...payload.items].slice(-50)
+      asrLastId = payload.last_id
+      void nextTick(() => {
+        const el = asrLogEl.value
+        if (el) el.scrollTop = el.scrollHeight
+      })
+    } else {
+      asrLastId = Math.max(asrLastId, payload.last_id)
+    }
+  } catch { /* 服务未就绪时保留已收文本 */ }
+}
+
+const asrNote = computed(() => {
+  if (!asrValve.value) return '数据接入已关闭'
+  if (fieldStatus.value?.asr_ready === false) return '服务未就绪，等待模型加载…'
+  return `机器人麦克风 · 实时转写 · 已 ${asrItems.value.length} 条`
+})
+
 watch(hardwareConfigured, (configured, _, onCleanup) => {
   fieldStatus.value = null
   visionStatus.value = null
@@ -232,7 +272,14 @@ watch(hardwareConfigured, (configured, _, onCleanup) => {
   const visionTimer = setInterval(() => { void pollVision() }, 2000)
   // 预览帧由视觉程序按 500ms 落盘，轮询略慢于产出即可。
   const visionFrameTimer = setInterval(() => { void pollVisionFrame() }, 700)
-  onCleanup(() => { clearInterval(timer); clearInterval(visionTimer); clearInterval(visionFrameTimer) })
+  // 语音转写按增量拉取，断句粒度约秒级
+  const asrTimer = setInterval(() => { void pollAsrText() }, 1500)
+  onCleanup(() => {
+    clearInterval(timer)
+    clearInterval(visionTimer)
+    clearInterval(visionFrameTimer)
+    clearInterval(asrTimer)
+  })
 })
 
 async function fieldAction(kind: 'reconnect-forwards' | 'start-pc2' | 'start-pc3') {
@@ -495,6 +542,7 @@ onBeforeUnmount(() => {
           <span :class="['field-light', { on: fieldStatus?.forwards?.['15052'] }]"><i></i>遥控转发</span>
           <span :class="['field-light', { on: fieldStatus?.vision_ready }]"><i></i>相机数据</span>
           <span :class="['field-light', { on: fieldStatus?.map_ready }]"><i></i>雷达数据</span>
+          <span :class="['field-light', { on: fieldStatus?.asr_ready }]"><i></i>语音识别</span>
         </div>
         <div class="field-actions">
           <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
@@ -565,6 +613,17 @@ onBeforeUnmount(() => {
             <img v-if="visionValve && visionFrameUrl" class="camera-frame" :src="visionFrameUrl" alt="机器人摄像头实时画面（带检测框）" />
             <div v-else class="monitor-placeholder">{{ visionValve ? '等待相机画面接入' : '相机数据接入已关闭' }}</div>
           </section>
+          <section v-if="hardwareMode" class="panel hardware-asr" aria-labelledby="hardware-asr-heading">
+            <div class="panel-heading">
+              <div><h2 id="hardware-asr-heading">语音识别</h2><span class="panel-caption">{{ asrNote }}</span></div>
+              <button class="data-valve" :class="{ on: asrValve }" type="button" :disabled="!!fieldBusy" data-testid="valve-asr" @click="toggleDataValve('asr')">{{ fieldBusy === 'data-asr' ? '启动中…' : asrValve ? '⏻ 开' : '⏻ 关' }}</button>
+            </div>
+            <div v-if="asrValve" ref="asrLogEl" class="asr-log">
+              <p v-for="item in asrItems" :key="item.id"><time>{{ new Date(item.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) }}</time>{{ item.text }}</p>
+              <p v-if="!asrItems.length" class="asr-empty">等待语音输入 —— 对着机器人上的麦克风说话</p>
+            </div>
+            <div v-else class="monitor-placeholder">语音识别已关闭</div>
+          </section>
         </div>
 
         <template v-if="modeKnown && !hardwareMode">
@@ -590,15 +649,22 @@ onBeforeUnmount(() => {
 <style scoped>
 .hardware-workspace {
   align-items: start;
-  grid-template-areas: 'map teleop' 'image teleop';
+  grid-template-areas: 'map teleop' 'image teleop' 'asr teleop';
 }
 .hardware-map { grid-area: map; }
 /* 遥控面板固定在侧栏后，三维场景占用原来的右列，与地图和相机窗口并排。 */
 .hardware-workspace > .scene-panel { grid-area: teleop; }
 .hardware-image { grid-area: image; }
+.hardware-asr { grid-area: asr; }
 .hardware-workspace > .teleop-panel { grid-area: teleop; }
+/* 语音转写记录：纵向滚动，时间列弱化 */
+.asr-log { max-height: 190px; overflow-y: auto; padding: 8px 4px 8px 0; }
+.asr-log p { margin: 0 0 8px; line-height: 1.5; color: #2c3f4d; }
+.asr-log p:last-child { margin-bottom: 0; }
+.asr-log time { color: #93a7b4; font-size: 11px; margin-right: 10px; font-variant-numeric: tabular-nums; }
+.asr-empty { color: #93a7b4; }
 @media (max-width: 800px) {
-  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image'; }
+  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image' 'asr'; }
 }
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
 .hardware-sidebar .brand { padding-bottom: 12px; }
