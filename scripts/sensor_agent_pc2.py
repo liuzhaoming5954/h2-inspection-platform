@@ -52,9 +52,11 @@ VISION_LOG = os.getenv("H2_VISION_LOG") or (
 VISION_TAIL_BYTES = 65536
 # 帧汇总行，例如：
 # [2026-11-18 16:56:03.592] person=0 led=1 red=1 green=0 qr=none center=1967mm
+# 检出二维码时 qr 为原文（可含空格/中文），且该帧不写 center 字段：
+# [2026-11-19 16:44:34.506] person=1 led=0 red=0 green=0 qr=您好，我是中核 404 智能巡检机器人
 FRAME_LINE = re.compile(
     r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\] "
-    r"person=(\d+) led=(\d+) red=(\d+) green=(\d+) qr=(.*?) center=(\d+)mm\s*$")
+    r"person=(\d+) led=(\d+) red=(\d+) green=(\d+) qr=(.*?)(?: center=(\d+)mm)?\s*$")
 # 帧内缩进的灯明细行，例如：    LED Red 734mm @(792,610)
 LED_LINE = re.compile(r"^\s+LED (\w+) (\d+)mm @\((\d+),(\d+)\)\s*$")
 # 预览帧文件：视觉程序每 500ms 原子写入（先写临时文件再 rename）的带检测框 PNG。
@@ -168,7 +170,8 @@ def parse_vision_tail(text: str) -> dict | None:
                 "green": int(green),
                 # 日志用字面量 none 表示本帧没有二维码，空串同样按无处理。
                 "qr": None if qr in ("none", "") else qr,
-                "center_mm": int(center),
+                # 检出二维码的帧不写 center 字段，与日志的 center=0 语义一致按 0 处理。
+                "center_mm": int(center) if center is not None else 0,
                 "leds": [],
             }
             continue

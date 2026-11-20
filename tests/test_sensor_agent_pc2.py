@@ -25,23 +25,34 @@ def agent():
 
 
 # 依次包含：无法归类的残行、两帧汇总行、灯明细行和程序退出标记。
+# 二维码帧取自 2026-11-19 现场真实日志：qr 原文可含空格/中文，且该帧不写 center。
 LOG_SAMPLE = """someone center=1963mm
 [2026-11-18 16:56:01.195] person=0 led=1 red=1 green=0 qr=none center=1985mm
     LED Red 735mm @(792,610)
 [2026-11-18 16:56:03.592] person=2 led=1 red=0 green=1 qr=机房 A 巡检点 3 center=1967mm
     LED Green 512mm @(80,90)
 ===== 程序退出 2026-11-18 16:56:12.930 =====
+[2026-11-19 16:44:34.506] person=1 led=0 red=0 green=0 qr=您好，我是中核 404 智能巡检机器人
 """
 
 
 def test_parse_vision_tail_returns_latest_frame(agent):
     latest = agent.parse_vision_tail(LOG_SAMPLE)
     assert latest == {
-        "frame_ts": "2026-11-18 16:56:03.592",
-        "person": 2, "led": 1, "red": 0, "green": 1,
-        "qr": "机房 A 巡检点 3", "center_mm": 1967,
-        "leds": [{"color": "green", "distance_mm": 512, "x": 80, "y": 90}],
+        "frame_ts": "2026-11-19 16:44:34.506",
+        "person": 1, "led": 0, "red": 0, "green": 0,
+        "qr": "您好，我是中核 404 智能巡检机器人", "center_mm": 0,
+        "leds": [],
     }
+
+
+def test_parse_vision_tail_keeps_center_frames(agent):
+    # 只含 center 帧时行为与旧格式一致（无二维码、有中心距离）。
+    sample = "[2026-11-18 16:56:03.592] person=2 led=1 red=0 green=1 qr=机房 A 巡检点 3 center=1967mm\n"
+    latest = agent.parse_vision_tail(sample)
+    assert latest is not None
+    assert latest["qr"] == "机房 A 巡检点 3"
+    assert latest["center_mm"] == 1967
 
 
 def test_parse_vision_tail_keeps_led_details_with_their_own_frame(agent):
