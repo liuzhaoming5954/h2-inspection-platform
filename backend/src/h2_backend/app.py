@@ -1,7 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from . import field
 from .config import Settings
+from .demo import DemoService
 from .service import InspectionService, ServiceError
 from .teleop import UI_ORIGINS, teleop_socket
 
@@ -43,6 +44,37 @@ class ReviewInput(BaseModel):
     note: str = Field(min_length=1, max_length=4000)
 
 
+class RouteStepInput(BaseModel):
+    """演示路线的单个步骤：前进(米)/转向(度，左转为正)/停留(秒)。"""
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["forward", "turn", "wait"]
+    value: float = Field(allow_inf_nan=False)
+    read_aloud: bool = False
+
+    @model_validator(mode="after")
+    def step_bounds(self) -> "RouteStepInput":
+        if self.type == "forward" and not 0.05 <= self.value <= 5:
+            raise ValueError("前进距离需在 0.05–5 米之间")
+        if self.type == "turn" and not (1 <= abs(self.value) <= 180):
+            raise ValueError("转向角度需在 ±180° 之间且不为零")
+        if self.type == "wait" and not 0.5 <= self.value <= 60:
+            raise ValueError("停留时长需在 0.5–60 秒之间")
+        if self.read_aloud and self.type != "wait":
+            raise ValueError("只有停留步支持朗读识别结果")
+        return self
+
+
+class RouteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: ShortText
+    steps: list[RouteStepInput] = Field(min_length=1, max_length=50)
+
+
+class DemoStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    route_id: str = Field(min_length=1, max_length=64)
+
+
 def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI:
     settings = settings or Settings.from_env()
     teleop_gateway = None
@@ -57,6 +89,7 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     if teleop_gateway is None:
         teleop_gateway = gateway
     service = InspectionService(settings, gateway)
+    demo = DemoService(settings, service)
 
     async def maintain() -> None:
         while True:
@@ -76,10 +109,12 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
         worker = None
         try:
             await asyncio.to_thread(service.initialize)
+            await asyncio.to_thread(demo.initialize)
             if not settings.hardware_teleop:
                 worker = asyncio.create_task(maintain())
             yield
         finally:
+            demo.shutdown()
             if worker is not None:
                 worker.cancel()
                 with suppress(asyncio.CancelledError):
@@ -96,6 +131,7 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
                   description="Local validation API. Inspection readings and images are simulated. "
                   "H2 hardware teleoperation requires an explicit local hardware configuration.")
     app.state.service = service
+    app.state.demo = demo
     app.add_middleware(CORSMiddleware,
                        allow_origins=list(UI_ORIGINS),
                        allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
@@ -199,6 +235,40 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     if settings.hardware_teleop:
         app.include_router(field_routes)
+
+    # 演示编排接口：模拟与真机模式都注册（模拟模式用于编辑器和执行器干跑，
+    # 语音编排部分在 DemoService 内部按模式自行跳过）。
+    demo_routes = APIRouter(prefix="/api/demo")
+
+    @demo_routes.get("/routes")
+    def demo_list_routes():
+        return demo.list_routes()
+
+    @demo_routes.post("/routes", status_code=201)
+    def demo_create_route(payload: RouteInput):
+        return demo.create_route(payload.model_dump())
+
+    @demo_routes.delete("/routes/{route_id}")
+    def demo_delete_route(route_id: str):
+        return demo.delete_route(route_id)
+
+    @demo_routes.get("/state")
+    def demo_state():
+        return demo.state()
+
+    @demo_routes.post("/start")
+    def demo_start(payload: DemoStartRequest):
+        return demo.start(payload.route_id)
+
+    @demo_routes.post("/stop")
+    def demo_stop():
+        return demo.stop()
+
+    @demo_routes.post("/routes/{route_id}/run")
+    def demo_run_route(route_id: str):
+        return demo.run_route(route_id)
+
+    app.include_router(demo_routes)
 
     @app.get("/api/robot")
     def robot():

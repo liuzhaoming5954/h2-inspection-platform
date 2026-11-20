@@ -31,6 +31,9 @@ PC2_START = (f"H2_PC2_BIND={shlex.quote(PC2_BIND)} PYTHONPATH=$HOME/pylibs "
              "nohup python3 ~/sensor_agent.py > ~/sensor_agent.log 2>&1 < /dev/null &")
 PC3_START = ("cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install "
              f"H2_SENSOR_AGENT_URL={shlex.quote(pc3_sensor_agent_url(PC2))} "
+             # 2026-11-20 实测：前进阈值在 0.4–0.5 之间（0.4 不抬脚），转向阈值恰在
+             # 0.55 附近（手动按住偶尔也只扭腰不迈步），现场反馈 1.0 偏快，取 0.7。
+             "H2_V_FORWARD_SLOW=0.5 H2_V_BACKWARD_SLOW=0.5 H2_V_TURN=0.7 H2_V_TURN_SLOW=0.7 "
              "nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 "
              "--host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &")
 
@@ -43,6 +46,12 @@ PC3_ROS_ENV = "source /opt/ros/noetic/setup.bash && source /workspace/G1Nav2D/de
 # 语音识别服务（PC3 本地闭环：reSpeaker 采集 + Qwen3-ASR 转写，模型常驻）
 PC3_ASR_START = ("cd ~/h2-asr && nohup ~/qwen3-asr-env/bin/python asr_service.py"
                  " > asr_service.log 2>&1 < /dev/null &")
+# 语音播报服务（PC3 网关 venv：需要 CycloneDDS 与 unitree_sdk2py 驱动机器人扬声器，
+# 与网关进程并行运行互不影响；HTTP :8099 提供 /say 与 /health）
+PC3_VOICE_START = ("cd ~/h2-inspection-platform"
+                   " && CYCLONEDDS_HOME=$PWD/.runtime/h2-sdk2/cyclonedds-install"
+                   " nohup .venv/bin/python ~/h2-asr/voice_service.py"
+                   " > ~/h2-asr/voice_service.log 2>&1 < /dev/null &")
 
 # 数据接入阀门：只存在于后端进程内存。相机/雷达默认开（显示是常态），
 # 语音默认关（主动使用型功能，开机不自动采音），重启回到此默认。
@@ -257,6 +266,60 @@ def asr_text(since: int = 0) -> dict | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def voice_ready() -> bool:
+    """语音播报服务就绪：PC3 上 voice_service 进程可响应。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8099/health", timeout=1.5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def start_pc3_voice() -> dict:
+    """启动 PC3 语音播报服务（网关 venv + DDS），幂等。"""
+    running = _ssh(PC3, 'pgrep -f "[v]oice_service.py" >/dev/null && echo running || echo stopped')
+    if running != "running":
+        _ssh_best_effort(PC3, PC3_VOICE_START)
+    for _ in range(6):
+        time.sleep(1.0)
+        if voice_ready():
+            break
+    return {"ok": voice_ready(), "already": running == "running"}
+
+
+def say(text: str) -> bool:
+    """请求机器人本体扬声器播报文本（voice_service 的 /say）。
+
+    演示流程中的提示性播报：失败不应中断流程，返回 False 由调用方记录。
+    """
+    body = json.dumps({"text": text}).encode()
+    request = urllib.request.Request(f"http://{PC3}:8099/say", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        # /say 阻塞到播完（voice_service 按字数估算持锁），长句可达 20 秒以上
+        with urllib.request.urlopen(request, timeout=40) as response:
+            payload = json.load(response)
+        return bool(payload.get("ok"))
+    except Exception:
+        return False
+
+
+def fastlio_pose(timeout: float = 1.0) -> dict | None:
+    """轻量拉取 FastLIO 位姿，演示序列执行器高频轮询用。
+
+    桥在尚未收到位姿时返回 age_ms=null，视为无效。map_data 的 5 秒
+    超时面向 MB 级点云，位姿这里放宽不得。
+    """
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8097/pose", timeout=timeout) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("age_ms") is None:
+        return None
+    return payload
 
 
 def start_pc3_asr() -> dict:

@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import socket
@@ -48,11 +49,36 @@ ENVIRONMENT_SAMPLE_ID = re.compile(r"([0-9a-f]{32}):([1-9][0-9]{0,15})")
 # 倾斜或原地偏航等平衡调整。起步速度介于 0.3 和 0.5 m/s 之间。
 # 下列数值经持续指令流和单条指令测试。
 # 步态和平衡仍由 H2 的内置控制器负责。
+# 慢速档（*_slow）供后端演示序列执行器做精确逼近，默认值已高于
+# 实测阈值的下限；现场阈值摸底后通过 H2_V_* 环境变量微调（见
+# _speed_from_env），网关重启即生效，无需改代码。
+
+
+def _speed_from_env(name: str, default: float) -> float:
+    """从环境变量读取速度幅值（正数），方向由动作名决定。
+
+    环境变量填写错误（非数字、零或负数）时回退默认值，
+    避免机器人因拼写失误收到低于行走阈值的速度。
+    """
+    raw = os.environ.get(name, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not math.isfinite(value) or value <= 0.0:
+        return default
+    return value
+
+
 VELOCITIES = {
-    "forward": (0.5, 0.0, 0.0),
-    "backward": (-0.5, 0.0, 0.0),
-    "turn_left": (0.0, 0.0, 0.55),
-    "turn_right": (0.0, 0.0, -0.55),
+    "forward": (_speed_from_env("H2_V_FORWARD", 0.5), 0.0, 0.0),
+    "backward": (-_speed_from_env("H2_V_BACKWARD", 0.5), 0.0, 0.0),
+    "turn_left": (0.0, 0.0, _speed_from_env("H2_V_TURN", 0.55)),
+    "turn_right": (0.0, 0.0, -_speed_from_env("H2_V_TURN", 0.55)),
+    "forward_slow": (_speed_from_env("H2_V_FORWARD_SLOW", 0.4), 0.0, 0.0),
+    "backward_slow": (-_speed_from_env("H2_V_BACKWARD_SLOW", 0.4), 0.0, 0.0),
+    "turn_left_slow": (0.0, 0.0, _speed_from_env("H2_V_TURN_SLOW", 0.4)),
+    "turn_right_slow": (0.0, 0.0, -_speed_from_env("H2_V_TURN_SLOW", 0.4)),
 }
 
 

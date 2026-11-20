@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import rospy
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Imu
 from sensor_msgs import point_cloud2 as pc2
 from sensor_msgs.msg import PointCloud2
 
@@ -34,7 +35,11 @@ MAX_POINTS = 400_000      # 发布上限：超出时按步长抽稀（内存中�
 PUBLISH_INTERVAL = 1.0    # /map 发布间隔（秒）
 PATH_STEP = 0.2           # 轨迹折线最小位移（米），原地抖动不刷点
 
-_lock = threading.Lock()
+# 两把锁分工（2026-11-20 实测）：on_body_cloud 以 10Hz 在锁内跑逐点累计循环，
+# 若与位姿共用一把锁，/pose 会被点云累计阻塞上百毫秒，演示执行器的指令流
+# 因此断流（帧过期→零速→步态重置）。位姿/轨迹用独立小锁，读取永不等待地图。
+_pose_lock = threading.Lock()
+_map_lock = threading.Lock()
 # 体素键（int64 打包）→ 该格首个命中点（世界系 xyz，米）
 _voxel_map: dict[int, tuple[float, float, float]] = {}
 _map_payload = b""
@@ -43,6 +48,10 @@ _pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
 _pose_quat = {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
 _pose_mono = 0.0
 _path_points: list[tuple[float, float, float]] = []
+# Mid360 内置 IMU 陀螺 z 积分：快速原地旋转时扫描匹配会滞后/滑移，
+# 旋转闭环用它做反馈（原生日志号：实测右转为正，与 ROS 左正相反）。
+_imu_yaw = 0.0
+_imu_last_t = None
 _path_payload = b""
 _last_path_xyz: tuple[float, float, float] | None = None
 
@@ -70,7 +79,7 @@ def on_odom(odom: Odometry) -> None:
     siny = 2.0 * (q.w * q.z + q.x * q.y)
     cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     xyz = (p.x, p.y, p.z)
-    with _lock:
+    with _pose_lock:
         _pose.update(x=p.x, y=p.y, z=p.z, yaw=math.atan2(siny, cosy))
         _pose_quat.update(x=q.x, y=q.y, z=q.z, w=q.w)
         _pose_mono = time.monotonic()
@@ -80,9 +89,21 @@ def on_odom(odom: Odometry) -> None:
             _path_points.append(xyz)
 
 
+def on_imu(msg: Imu) -> None:
+    """陀螺积分（约 200Hz，仅取小锁更新，不与点云累计互卡）。"""
+    global _imu_yaw, _imu_last_t
+    stamp = msg.header.stamp.to_sec()
+    t = stamp if stamp > 0.0 else time.time()
+    with _pose_lock:
+        last = _imu_last_t
+        if last is not None and 0.0 < t - last < 0.1:
+            _imu_yaw += msg.angular_velocity.z * (t - last)
+        _imu_last_t = t
+
+
 def on_body_cloud(cloud: PointCloud2) -> None:
     """每帧扫描：用缓存位姿变换到世界系，累计进体素哈希。"""
-    with _lock:
+    with _pose_lock:
         has_pose = _pose_mono > 0.0
         position = np.array([_pose["x"], _pose["y"], _pose["z"]], dtype=np.float64)
         quat = dict(_pose_quat)
@@ -110,7 +131,7 @@ def on_body_cloud(cloud: PointCloud2) -> None:
     world = body.astype(np.float64) @ _quat_matrix(quat["x"], quat["y"], quat["z"], quat["w"]).T + position
     keys = _voxel_keys(world)
     added = 0
-    with _lock:
+    with _map_lock:
         voxel_map = _voxel_map
         for key, point in zip(keys.tolist(), world.tolist()):
             if key not in voxel_map:
@@ -130,8 +151,9 @@ def publish_loop() -> None:
     global _map_payload, _map_mono, _path_payload
     while not rospy.is_shutdown():
         time.sleep(PUBLISH_INTERVAL)
-        with _lock:
+        with _map_lock:
             values = list(_voxel_map.values())
+        with _pose_lock:
             path = np.asarray(_path_points, dtype=np.float32) if _path_points else None
         if not values:
             continue
@@ -140,7 +162,7 @@ def publish_loop() -> None:
             step = (len(cloud) + MAX_POINTS - 1) // MAX_POINTS
             cloud = cloud[::step]
         payload = _pack_points(cloud)
-        with _lock:
+        with _map_lock:
             _map_payload = payload
             _map_mono = time.monotonic()
             if path is not None:
@@ -161,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - 标准库方法名
         if self.path == "/map":
-            with _lock:
+            with _map_lock:
                 payload, mono = _map_payload, _map_mono
             if not payload:
                 self.send_error(503, "map not ready")
@@ -172,12 +194,13 @@ class Handler(BaseHTTPRequestHandler):
                           "X-Map-Age-Ms": str(age),
                           "X-Map-Voxel": f"{VOXEL:.3f}"})
         elif self.path == "/pose":
-            with _lock:
-                pose, mono = dict(_pose), _pose_mono
+            with _pose_lock:
+                pose, mono, imu_yaw = dict(_pose), _pose_mono, _imu_yaw
             age_ms = int(max(0.0, (time.monotonic() - mono) * 1000.0)) if mono else None
-            self._common(json.dumps({**pose, "age_ms": age_ms}).encode(), "application/json")
+            self._common(json.dumps({**pose, "age_ms": age_ms,
+                                     "imu_yaw": round(imu_yaw, 6)}).encode(), "application/json")
         elif self.path == "/path":
-            with _lock:
+            with _map_lock:
                 payload = _path_payload
             if not payload:
                 self.send_error(503, "path not ready")
@@ -195,6 +218,7 @@ def main() -> None:
     rospy.Subscriber("/body_cloud", PointCloud2, on_body_cloud,
                      queue_size=1, buff_size=1 << 24)
     rospy.Subscriber("/slam_odom", Odometry, on_odom, queue_size=10)
+    rospy.Subscriber("/livox/imu", Imu, on_imu, queue_size=400)
     threading.Thread(target=publish_loop, daemon=True, name="publish").start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     rospy.loginfo(f"h2_map_bridge v2 serving :{PORT}/map /pose /path")

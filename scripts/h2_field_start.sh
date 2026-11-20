@@ -66,8 +66,11 @@ if sshpass -p "$PASS" ssh -o ConnectTimeout=5 unitree@"$PC3" \
 else
   # 即使将标准输入重定向到 /dev/null，通过 SSH 运行 nohup 也可能挂起通道，因此设置超时。
   # 超时后 PC3 上的后台进程仍可能已启动，由后续探测确认。
+  # H2_V_*：2026-11-20 实测——前进阈值在 0.4–0.5（0.4 不抬脚，取 0.5）；转向阈值恰在
+  # 0.55 附近（手动按住偶尔只扭腰不迈步），取 1.0 rad/s 留余量（官方例程 ω=1.0–2.0）。
+  # 与 field.py 的 PC3_START 模板保持同步。
   timeout 15 sshpass -p "$PASS" ssh unitree@"$PC3" \
-    "cd ~/h2-inspection-platform && CYCLONEDDS_HOME=\$PWD/.runtime/h2-sdk2/cyclonedds-install H2_SENSOR_AGENT_URL=$(quote_for_ssh "$PC3_SENSOR_AGENT_URL") nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &" \
+    "cd ~/h2-inspection-platform && CYCLONEDDS_HOME=\$PWD/.runtime/h2-sdk2/cyclonedds-install H2_SENSOR_AGENT_URL=$(quote_for_ssh "$PC3_SENSOR_AGENT_URL") H2_V_FORWARD_SLOW=0.5 H2_V_BACKWARD_SLOW=0.5 H2_V_TURN=0.7 H2_V_TURN_SLOW=0.7 nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 --host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &" \
     </dev/null >>"$LOG_DIR/h2-start.log" 2>&1 \
     && echo "   started" || echo "   launch command timed out or failed - probing to confirm"
   sleep 3

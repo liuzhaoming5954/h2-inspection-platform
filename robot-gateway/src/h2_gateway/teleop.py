@@ -15,8 +15,19 @@ TICK_SECONDS = 0.02
 # 这些数值只影响模拟场景中的机器人位置。
 LINEAR_SPEED = 0.35
 TURN_SPEED = 0.8
-DIRECTIONS = frozenset({"forward", "backward", "turn_left", "turn_right"})
+# 慢速档与真机网关的 slow 动作对应，供演示序列执行器在模拟干跑中
+# 以接近现场的慢速逼近目标；数值只影响模拟位姿的积分速度。
+SLOW_LINEAR_SPEED = 0.2
+SLOW_TURN_SPEED = 0.4
+DIRECTIONS = frozenset({"forward", "backward", "turn_left", "turn_right",
+                        "forward_slow", "backward_slow", "turn_left_slow", "turn_right_slow"})
 ACTIONS = DIRECTIONS | {"stop", "heartbeat"}
+
+# 动作名 → 带符号速度。线性速度沿机头方向，角速度左转为正。
+LINEAR_SPEEDS = {"forward": LINEAR_SPEED, "forward_slow": SLOW_LINEAR_SPEED,
+                 "backward": -LINEAR_SPEED, "backward_slow": -SLOW_LINEAR_SPEED}
+TURN_SPEEDS = {"turn_left": TURN_SPEED, "turn_left_slow": SLOW_TURN_SPEED,
+               "turn_right": -TURN_SPEED, "turn_right_slow": -SLOW_TURN_SPEED}
 
 
 def teleop_reply(accepted: bool, code: str, message: str, token: str = "") -> dict[str, Any]:
@@ -59,13 +70,13 @@ class SimulatedTeleop:
         if self.motion in DIRECTIONS:
             elapsed = max(0.0, min(now, self.lease_deadline, self.motion_deadline) - self.last_tick)
             if elapsed:
-                if self.motion in {"forward", "backward"}:
-                    displacement = LINEAR_SPEED * elapsed * (1 if self.motion == "forward" else -1)
+                if self.motion in LINEAR_SPEEDS:
+                    displacement = LINEAR_SPEEDS[self.motion] * elapsed
                     self.x += displacement * math.cos(self.yaw)
                     self.y += displacement * math.sin(self.yaw)
                 else:
-                    angle = TURN_SPEED * elapsed * (1 if self.motion == "turn_left" else -1)
-                    self.yaw = math.remainder(self.yaw + angle, 2 * math.pi)
+                    self.yaw = math.remainder(self.yaw + TURN_SPEEDS[self.motion] * elapsed,
+                                              2 * math.pi)
                 changed = True
         self.last_tick = now
         if now >= self.lease_deadline or (self.motion in DIRECTIONS and now >= self.motion_deadline):

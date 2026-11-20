@@ -5,6 +5,7 @@ import json
 import shlex
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
+import urllib.request
 
 from fastapi.testclient import TestClient
 import pytest
@@ -227,6 +228,57 @@ def test_asr_text_route_gated_by_valve(settings, gateway, monkeypatch, valves_de
         ok = client.get("/api/field/asr/text?since=5")
         assert ok.status_code == 200 and ok.json() == {"items": [], "last_id": 0}
         field.asr_text.assert_called_once_with(5)
+
+
+def test_start_pc3_voice_is_idempotent(monkeypatch):
+    monkeypatch.setattr(field, "_ssh", Mock(return_value="running"))
+    monkeypatch.setattr(field, "voice_ready", Mock(return_value=True))
+    assert field.start_pc3_voice() == {"ok": True, "already": True}
+
+
+def test_start_pc3_voice_launches_with_gateway_venv(monkeypatch):
+    monkeypatch.setattr(field, "time", SimpleNamespace(sleep=lambda _: None))
+    monkeypatch.setattr(field, "_ssh", Mock(return_value="stopped"))
+    launcher = Mock()
+    monkeypatch.setattr(field, "_ssh_best_effort", launcher)
+    monkeypatch.setattr(field, "voice_ready", Mock(return_value=True))
+    assert field.start_pc3_voice() == {"ok": True, "already": False}
+    command = launcher.call_args[0][1]
+    assert "voice_service.py" in command and "CYCLONEDDS_HOME" in command
+
+
+def test_say_posts_text_and_folds_failures(monkeypatch):
+    posts = []
+
+    def urlopen(request, timeout=None):
+        posts.append((request.full_url, request.data))
+        return BytesIO(json.dumps({"ok": True, "code": 0}).encode())
+    # 只替换 urlopen，Request 仍用真实实现（say 需要它构造 POST）
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(
+        request=SimpleNamespace(urlopen=urlopen, Request=urllib.request.Request)))
+    assert field.say("语音链路正常。") is True
+    url, data = posts[0]
+    assert url == f"http://{field.PC3}:8099/say"
+    assert json.loads(data) == {"text": "语音链路正常。"}
+
+    refused = MagicMock(side_effect=OSError("connection refused"))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(
+        request=SimpleNamespace(urlopen=refused, Request=urllib.request.Request)))
+    assert field.say("再试一次") is False
+
+
+def test_fastlio_pose_requires_fresh_age(monkeypatch):
+    fresh = {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.5, "age_ms": 20}
+    urlopen = MagicMock(return_value=BytesIO(json.dumps(fresh).encode()))
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.fastlio_pose() == fresh
+    urlopen.assert_called_once_with(f"http://{field.PC3}:8097/pose", timeout=1.0)
+
+    # 桥尚未收到位姿时 age_ms=null，执行器必须视为无效
+    empty = BytesIO(json.dumps({"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": None}).encode())
+    urlopen = MagicMock(return_value=empty)
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.fastlio_pose() is None
 
 
 def test_data_valve_close_gates_data_and_keeps_services(settings, gateway, monkeypatch, valves_default):

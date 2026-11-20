@@ -5,6 +5,7 @@ import RoomScene from './components/RoomScene.vue'
 import MapPanel from './components/MapPanel.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
 import TeleopPanel from './components/TeleopPanel.vue'
+import DemoPanel from './components/DemoPanel.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
 
 const defaultPoints: RoutePoint[] = [
@@ -30,6 +31,11 @@ const serviceLoading = ref(true)
 const robotLoading = ref(true)
 const loading = computed(() => serviceLoading.value || robotLoading.value)
 const teleopSession = ref(false)
+// 演示编排占用运动租约时（拉起/武装/执行）禁用手动遥控：单一租约互斥的界面提示
+const demoActive = ref(false)
+function setDemoActive(active: boolean) {
+  demoActive.value = active
+}
 const submitting = ref(false)
 const stopping = ref(false)
 const reporting = ref(false)
@@ -56,12 +62,13 @@ const teleopDisabledReason = computed(() => {
     // 遥控网关在授予控制权和处理每次请求时检查实时就绪状态。
     // 状态轮询延迟时，仍允许正常的遥控会话继续运行。
     if (teleopSession.value) return ''
+    if (demoActive.value) return '巡检演示执行中，结束后可申请遥控'
     if (!connected.value || !robot.value) return '等待服务和机器人连接'
     if (robot.value.status === 'fault') return '真机遥控故障，请检查网关和机器人'
     return robot.value.teleop_ready === true ? '' : '等待机器人进入可遥控的高层运动状态'
   }
   if (!connected.value) return '等待服务和机器人连接'
-  return active.value || robotBusy.value || submitting.value || stopping.value ? '巡检任务处理中，结束后可申请遥控' : ''
+  return active.value || robotBusy.value || submitting.value || stopping.value || demoActive.value ? '巡检任务或演示执行中，结束后可申请遥控' : ''
 })
 const progress = computed(() => Math.max(0, Math.min(100, selectedTask.value?.progress ?? 0)))
 const points = computed(() => selectedTask.value?.points?.length ? selectedTask.value.points : defaultPoints)
@@ -238,9 +245,14 @@ const asrLogEl = ref<HTMLDivElement>()
 async function pollAsrText() {
   if (disposed || hardwareConfigured.value !== true || !asrValve.value) return
   try {
-    const payload = await request<{ items: AsrItem[]; last_id: number }>(
+    let payload = await request<{ items: AsrItem[]; last_id: number }>(
       `/api/field/asr/text?since=${asrLastId}`, { cache: 'no-store' })
     if (disposed || !asrValve.value) return
+    // ASR 服务重启后 id 从 1 重新计数：检测到回卷就从头拉一遍，避免新文本被旧 since 滤掉
+    if (payload.last_id < asrLastId) {
+      asrLastId = 0
+      payload = await request(`/api/field/asr/text?since=0`, { cache: 'no-store' })
+    }
     if (payload.items.length) {
       asrItems.value = [...asrItems.value, ...payload.items].slice(-50)
       asrLastId = payload.last_id
@@ -605,6 +617,12 @@ onBeforeUnmount(() => {
           </section>
           <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? (poseAnchor ? '三维位姿 · 视图原点已重置' : '三维位姿 · 开机点坐标系（重启归零）') : '三维位姿与任务路线' }}</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span><button v-if="hardwareMode" class="scene-reset" type="button" :disabled="!robot?.pose" data-testid="scene-reset" @click="resetViewAnchor">{{ poseAnchor ? '再次重置' : '重置视图' }}</button></span></div><RoomScene :robot="displayRobot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span v-if="poseAnchor">视图原点已重置（当前位置 = 场景中心）· 视图坐标 {{ displayRobot?.pose ? displayRobot.pose.x.toFixed(2) + ', ' + displayRobot.pose.y.toFixed(2) + ' m' : '—' }}</span><span v-else>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
+          <section v-if="modeKnown && !hardwareMode" class="panel demo-panel-sim" aria-labelledby="demo-sim-heading">
+            <div class="panel-heading">
+              <div><h2 id="demo-sim-heading">巡检演示（干跑）</h2><span class="panel-caption">路线编辑与执行器干跑 · 语音编排需真机模式</span></div>
+            </div>
+            <DemoPanel :hardware="false" @active-change="setDemoActive" />
+          </section>
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
               <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">{{ visionFrameNote }}</span></div>
@@ -623,6 +641,12 @@ onBeforeUnmount(() => {
               <p v-if="!asrItems.length" class="asr-empty">等待语音输入 —— 对着机器人上的麦克风说话</p>
             </div>
             <div v-else class="monitor-placeholder">语音识别已关闭</div>
+          </section>
+          <section v-if="hardwareMode" class="panel hardware-demo" aria-labelledby="hardware-demo-heading">
+            <div class="panel-heading">
+              <div><h2 id="hardware-demo-heading">巡检演示</h2><span class="panel-caption">一键拉起模块 · 语音「开始」触发 · 路线闭环执行</span></div>
+            </div>
+            <DemoPanel :hardware="true" @active-change="setDemoActive" />
           </section>
         </div>
 
@@ -649,13 +673,14 @@ onBeforeUnmount(() => {
 <style scoped>
 .hardware-workspace {
   align-items: start;
-  grid-template-areas: 'map teleop' 'image teleop' 'asr teleop';
+  grid-template-areas: 'map teleop' 'image teleop' 'asr teleop' 'demo teleop';
 }
 .hardware-map { grid-area: map; }
 /* 遥控面板固定在侧栏后，三维场景占用原来的右列，与地图和相机窗口并排。 */
 .hardware-workspace > .scene-panel { grid-area: teleop; }
 .hardware-image { grid-area: image; }
 .hardware-asr { grid-area: asr; }
+.hardware-demo { grid-area: demo; }
 .hardware-workspace > .teleop-panel { grid-area: teleop; }
 /* 语音转写记录：纵向滚动，时间列弱化 */
 .asr-log { max-height: 190px; overflow-y: auto; padding: 8px 4px 8px 0; }
@@ -664,7 +689,7 @@ onBeforeUnmount(() => {
 .asr-log time { color: #93a7b4; font-size: 11px; margin-right: 10px; font-variant-numeric: tabular-nums; }
 .asr-empty { color: #93a7b4; }
 @media (max-width: 800px) {
-  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image' 'asr'; }
+  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image' 'asr' 'demo'; }
 }
 .hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
 .hardware-sidebar .brand { padding-bottom: 12px; }

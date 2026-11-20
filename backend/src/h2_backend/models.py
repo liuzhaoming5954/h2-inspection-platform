@@ -84,3 +84,17 @@ class Review(Base):
     task_id: Mapped[str] = mapped_column(ForeignKey("inspection_tasks.id"), index=True)
     note: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DemoRoute(Base):
+    """巡检演示的运动路线：步骤列表以 JSON 存储（参照 Task.points）。
+
+    单个步骤形如 {"type": "forward|turn|wait", "value": 米/度/秒, "read_aloud": bool}，
+    read_aloud 仅对停留步有意义（停留期间朗读视觉识别结果）。
+    """
+    __tablename__ = "demo_routes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

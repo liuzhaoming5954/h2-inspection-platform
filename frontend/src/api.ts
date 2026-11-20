@@ -68,6 +68,32 @@ export interface ServiceHealth {
   hardware_teleop?: boolean
 }
 
+// 巡检演示：编排层只描述 距离(米)/角度(度，左转为正)/停留(秒)，速度由执行器管理
+export type DemoStepType = 'forward' | 'turn' | 'wait'
+
+export interface DemoStep {
+  type: DemoStepType
+  value: number
+  read_aloud?: boolean
+}
+
+export interface DemoRoute {
+  id: string
+  name: string
+  steps: DemoStep[]
+  created_at?: string
+}
+
+export interface DemoState {
+  phase: 'idle' | 'starting' | 'armed' | 'running' | 'done' | 'aborted'
+  detail: string
+  error: string | null
+  route: DemoRoute | null
+  step_index: number
+  steps_total: number
+  hardware: boolean
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const timeout = AbortSignal.timeout(path.endsWith('/reports') ? 60_000 : 8_000)
   const response = await fetch(path, {

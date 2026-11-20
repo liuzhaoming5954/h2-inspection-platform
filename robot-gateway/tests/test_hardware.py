@@ -78,6 +78,32 @@ def test_deadline_and_heartbeat_do_not_extend_motion(hardware):
     assert loco.commands.empty()
 
 
+def test_slow_actions_use_reduced_speeds(hardware):
+    """慢速档动作走独立的低速度表，供演示序列执行器精确逼近。"""
+    from h2_gateway import hardware as hardware_module
+    gateway, loco = hardware
+    token = gateway.teleop_acquire()["token"]
+    assert send(gateway, token, 1, "forward_slow")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0.4, 0, 0)
+    assert send(gateway, token, 2, "turn_right_slow")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0, 0, -0.4)
+    assert send(gateway, token, 3, "stop")["accepted"]
+    assert loco.commands.get(timeout=1)[0] == (0, 0, 0)
+    # 环境变量按幅值覆盖默认速度；非法值回退默认，防止拼写错误给出零速度。
+    assert hardware_module._speed_from_env("H2_V_TEST_MISSING", 0.5) == 0.5
+    assert hardware_module.VELOCITIES["forward_slow"][0] == 0.4
+
+
+def test_speed_env_override_parses_magnitude(monkeypatch):
+    from h2_gateway import hardware as hardware_module
+    monkeypatch.setenv("H2_V_TEST_SLOW", "0.33")
+    assert hardware_module._speed_from_env("H2_V_TEST_SLOW", 0.5) == 0.33
+    monkeypatch.setenv("H2_V_TEST_NEGATIVE", "-1")
+    assert hardware_module._speed_from_env("H2_V_TEST_NEGATIVE", 0.5) == 0.5
+    monkeypatch.setenv("H2_V_TEST_GARBAGE", "fast")
+    assert hardware_module._speed_from_env("H2_V_TEST_GARBAGE", 0.5) == 0.5
+
+
 @pytest.mark.parametrize("stop_fails", [False, True])
 def test_uncertain_movement_revokes_lease_and_requests_zero(hardware, stop_fails):
     gateway, loco = hardware

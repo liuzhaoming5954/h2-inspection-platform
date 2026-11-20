@@ -34,7 +34,9 @@ SPEECH_ENTER_RATIO = 4.0       # 进入语音：窗能量 ≥ 噪声底 × 此�
 SPEECH_EXIT_RATIO = 2.0        # 退出语音：窗能量 < 噪声底 × 此倍数
 ENTER_FRAMES = 6               # 连续 180ms 超门限才算说话开始
 EXIT_MS = 700                  # 静音 0.7 秒断句
-MAX_SEGMENT_S = 12.0           # 单段最长，超过强制切段
+MAX_SEGMENT_S = 4.0            # 单段最长，超过强制切段（2026-11-20 现场两轮收紧：
+                                 # CPU 推理约 3~4 倍实时，长段积压让转写落后实时数十秒）
+STALE_SEGMENT_S = 15.0         # 入队超过此龄的段直接丢弃：触发词场景要新鲜度不要完整性
 MIN_SEGMENT_S = 0.5            # 过短片段丢弃（大概率是机器人噪音冲击）
 MAX_RESULTS = 100              # 环形结果条数
 FLOOR_WINDOWS = 200            # 噪声底滑动窗（约 6 秒），取 20 百分位
@@ -51,7 +53,7 @@ _next_id = 1
 _rms_history: list[float] = []  # 滑动窗内的窗能量，用于百分位噪声底
 _noise_floor = 0.005
 _debug_events: list[dict] = []  # 最近的状态跳变与段落事件，供现场标定
-_segments: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=4)
+_segments: "queue.Queue[tuple[float, np.ndarray]]" = queue.Queue(maxsize=2)
 
 
 def _note_event(kind: str, **fields) -> None:
@@ -97,15 +99,23 @@ def _mono_from_stereo(raw: bytes) -> np.ndarray:
 def _enqueue_segment(buf: list[np.ndarray], samples: int, channel: int) -> None:
     """拼接段并选目标声道：实测 ch1 为语音、ch0 近静默，由调用方按段能量择路。"""
     segment = np.concatenate(buf, axis=1)[:, :samples][channel].copy()
+    item = (time.time(), segment)
     try:
-        _segments.put_nowait(segment)
+        _segments.put_nowait(item)
     except queue.Full:
+        # 推理跟不上时丢「最长」段而不是最旧：短而新的口令段优先存活，
+        # 演示触发要的是新鲜度（长段大概率是环境闲聊，转了也没用）
+        kept = []
+        for _ in range(2):
+            try:
+                kept.append(_segments.get_nowait())
+            except queue.Empty:
+                break
+        kept.sort(key=lambda entry: entry[1].size)
+        if kept:
+            _segments.put_nowait(kept[0])
         try:
-            _segments.get_nowait()  # 推理跟不上时丢最旧段，保实时性
-        except queue.Empty:
-            pass
-        try:
-            _segments.put_nowait(segment)
+            _segments.put_nowait(item)
         except queue.Full:
             pass
 
@@ -173,7 +183,10 @@ def _inference_loop() -> None:
     """单线程顺序推理：模型串行调用，结果进环形缓冲。"""
     global _next_id
     while True:
-        segment = _segments.get()
+        enqueued_at, segment = _segments.get()
+        if time.time() - enqueued_at > STALE_SEGMENT_S:
+            _note_event("stale-drop", seconds=round(segment.size / SAMPLE_RATE, 1))
+            continue
         if _model is None:
             time.sleep(1.0)      # 模型尚未加载完；该段放弃但避免忙转
             continue

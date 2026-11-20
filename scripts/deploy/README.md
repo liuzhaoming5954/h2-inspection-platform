@@ -47,9 +47,24 @@ bash scripts/deploy/setup_workstation.sh
 
 PC3 另运行 noetic 容器做 FastLIO2 实时建图（只建图不导航，对 `~/fastlio2_ros1_g1` 源码零改动），点云/位姿/轨迹经 PC3:8097 数据桥供上位机「地图显示」模块渲染。镜像构建、离线部署、启动命令与排障见 [scripts/fastlio/README.md](../fastlio/README.md)。
 
-### PC3 语音识别（Qwen3-ASR）
+### PC3 语音识别与播报（Qwen3-ASR + voice_service）
 
-PC3 `~/h2-asr/` 的语音服务（reSpeaker 四麦阵列 → Qwen3-ASR 本地转写 → :8098），上位机「语音识别」面板的开关首次开阀自动拉起，之后只控采音。麦克风双路语义与 VAD 标定见 [scripts/asr/README.md](../asr/README.md)。
+PC3 `~/h2-asr/` 的语音服务（reSpeaker 四麦阵列 → Qwen3-ASR 本地转写 → :8098），上位机「语音识别」面板的开关首次开阀自动拉起，之后只控采音。播报服务 `voice_service.py` 以网关 venv 运行（:8099 `/say`、`/health`，含关键词自动应答），「巡检演示」开关自动拉起并经它驱动全部话术；手动操作见 [scripts/asr/README.md](../asr/README.md)。
+
+### PC3 网关运动速度（环境变量）
+
+H2 的 HybridWalk 控制器存在起步阈值，网关速度表经环境变量现场可调（填幅值正数，非法值回退默认），改后重启 PC3 网关生效：
+
+| 变量 | 默认 | 用途 |
+| --- | --- | --- |
+| `H2_V_FORWARD` / `H2_V_BACKWARD` | 0.5 m/s | 手动遥控巡航速度 |
+| `H2_V_TURN` | 0.55 rad/s | 手动遥控转向速度 |
+| `H2_V_FORWARD_SLOW` / `H2_V_BACKWARD_SLOW` | 0.4 m/s | 演示路线脉冲逼近用慢速档（默认已高于实测起步阈值下限 0.3 m/s） |
+| `H2_V_TURN_SLOW` | 0.4 rad/s | 演示路线慢速转向（实测 0.25 rad/s 不抬脚） |
+
+### 巡检演示（语音触发 + 路线闭环）
+
+上位机「巡检演示」面板：开关一键拉起 视觉/建图/语音识别/播报 全部服务并播报问候语，关键词「开始」触发选中路线；「手动执行」为调试直跑入口（模拟模式即执行器干跑）。路线编排只描述 距离/角度/时长，反馈来自 FastLIO 位姿。现场联调顺序与验收项见 [H2_COMMISSIONING 第 7 节](../../robot-gateway/H2_COMMISSIONING.md)。
 
 ## 换网段与启动
 

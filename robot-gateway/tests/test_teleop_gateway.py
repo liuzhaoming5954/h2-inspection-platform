@@ -7,7 +7,7 @@ import pytest
 from h2_gateway.client import GatewayClient
 from h2_gateway.engine import SimulatorEngine, now_ms
 from h2_gateway.server import create_server
-from h2_gateway.teleop import LINEAR_SPEED, MAX_MOTION_SECONDS, SimulatedTeleop
+from h2_gateway.teleop import LINEAR_SPEED, MAX_MOTION_SECONDS, SLOW_LINEAR_SPEED, SLOW_TURN_SPEED, SimulatedTeleop
 
 
 def wait_until(condition, timeout=3):
@@ -30,6 +30,20 @@ def test_heartbeat_renews_lease_but_cannot_extend_direction():
     assert controller.pose() == pytest.approx({"x": LINEAR_SPEED * MAX_MOTION_SECONDS, "y": 0, "yaw": 0})
     assert controller.motion == "stop"
     assert not controller.token
+
+
+def test_slow_directions_integrate_at_reduced_speed():
+    """慢速档与真机网关动作对应，演示序列干跑时以慢速积分位姿。"""
+    controller = SimulatedTeleop()
+    token = controller.acquire(100)["token"]
+    assert controller.command(token, 1, "forward_slow", 500, 100)["accepted"]
+    controller.advance(100.3)
+    assert controller.pose()["x"] == pytest.approx(SLOW_LINEAR_SPEED * 0.3)
+    assert controller.command(token, 2, "turn_left_slow", 500, 100.3)["accepted"]
+    controller.advance(100.5)
+    assert controller.pose()["yaw"] == pytest.approx(SLOW_TURN_SPEED * 0.2)
+    assert controller.command(token, 3, "stop", 500, 100.5)["accepted"]
+    assert controller.motion == "stop"
 
 
 def test_watchdog_stops_without_reads_and_old_token_cannot_take_over(tmp_path):
