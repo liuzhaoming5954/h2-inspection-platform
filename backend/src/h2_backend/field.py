@@ -34,6 +34,17 @@ PC3_START = ("cd ~/h2-inspection-platform && CYCLONEDDS_HOME=$PWD/.runtime/h2-sd
              "nohup .venv/bin/python -u -m h2_gateway.server --h2-interface eth10 "
              "--host 127.0.0.1 --port 50051 --teleop-port 50052 > gateway.log 2>&1 < /dev/null &")
 
+# 数据源程序（区别于链路进程）：视觉程序在 PC2，建图栈在 PC3 容器。
+# 打开数据阀门时若程序未运行则按需拉起；关闭阀门从不停止这些程序。
+PC2_VISION_DIR = "~/OrbbecSDK_v2.10.6_202609291004_575347c_linux_x86_64/examples/build"
+PC2_VISION_START = (f"cd {PC2_VISION_DIR} && OB_HEADLESS=1 nohup ./bin/ob_callback"
+                    " > ob_headless.log 2>&1 < /dev/null &")
+PC3_ROS_ENV = "source /opt/ros/noetic/setup.bash && source /workspace/G1Nav2D/devel/setup.bash"
+
+# 数据接入阀门：只存在于后端进程内存，重启回到默认全开
+#（开是工作常态，关是临时操作，重启后不保留关闭意图）。
+DATA_VALVES = {"vision": True, "mapping": True}
+
 
 class FieldError(RuntimeError):
     pass
@@ -149,12 +160,16 @@ def forwards_status() -> dict[str, bool]:
 def status(gateway_connected: bool) -> dict:
     """提供界面所需的链路状态。PC3 网关监听 PC3 的回环地址，
     上位机通过两条转发的状态以及后端自身的网关连接
-    判断网关是否可达。"""
+    判断网关是否可达。相机/雷达灯按数据就绪判定（上游全链有产出），
+    与阀门独立：服务在跑而接入关闭时灯仍为绿。"""
     forwards = forwards_status()
     return {
         "pc2_agent": probe_pc2(),
+        "vision_ready": vision_frame_ready(),
         "forwards": forwards,
         "gateway": gateway_connected and all(forwards.values()),
+        "map_ready": map_bridge_ready(),
+        "valves": dict(DATA_VALVES),
     }
 
 
@@ -194,3 +209,102 @@ def start_pc3_gateway() -> dict:
     time.sleep(3.5)
     ports = _ssh(PC3, "ss -tln | grep -c '5005[12]'")
     return {"ok": ports == "2", "already": False}
+
+
+def vision_frame_ready() -> bool:
+    """相机数据就绪：PC2 代理与视觉程序都在产出预览帧。"""
+    try:
+        with urllib.request.urlopen(pc2_vision_frame_url(PC2), timeout=1.5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def map_bridge_ready() -> bool:
+    """雷达数据就绪：PC3 容器建图栈与数据桥在产出位姿。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8097/pose", timeout=1.5) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def start_pc2_vision() -> dict:
+    """启动 PC2 视觉程序（headless，产出预览帧），幂等。"""
+    running = _ssh(PC2, 'pgrep -f "[b]in/ob_callback" >/dev/null && echo running || echo stopped')
+    if running == "running":
+        return {"ok": vision_frame_ready(), "already": True}
+    _ssh_best_effort(PC2, PC2_VISION_START)
+    # 模型加载与首帧产出需要数秒
+    for _ in range(8):
+        time.sleep(1.5)
+        if vision_frame_ready():
+            break
+    return {"ok": vision_frame_ready(), "already": False}
+
+
+def _ensure_docker_group() -> None:
+    """首次使用时把 unitree 加入 PC3 的 docker 组（一次性系统变更），
+    之后 docker 命令免 sudo；组权限在每次新建的 SSH 会话中生效。"""
+    groups = _ssh(PC3, "id -nG unitree")
+    if "docker" not in groups.split():
+        password = shlex.quote(_password())
+        _ssh(PC3, f"echo {password} | sudo -S -p '' usermod -aG docker unitree 2>/dev/null")
+
+
+def start_pc3_mapping() -> dict:
+    """启动 PC3 建图数据链（容器→建图栈→桥），幂等，返回各步是否新拉起。
+
+    机器人重启后容器不会自启，此步最常触发；容器不存在时不自动创建，
+    需先运行离线部署脚本。雷达握手与首帧位姿需要十秒级，以 :8097/pose 验证。
+    """
+    started = {"container": False, "mapping": False, "bridge": False}
+    _ensure_docker_group()
+    running = _ssh(PC3, "docker ps --format '{{.Names}}' | grep -qx ros-noetic-dev"
+                       " && echo running || echo stopped")
+    if running != "running":
+        exists = _ssh(PC3, "docker ps -a --format '{{.Names}}' | grep -qx ros-noetic-dev"
+                          " && echo yes || echo no")
+        if exists != "yes":
+            return {"ok": False, "error": "PC3 上没有建图容器，请先运行离线部署脚本 pc3-setup.sh"}
+        _ssh(PC3, "docker start ros-noetic-dev", timeout=30)
+        started["container"] = True
+        time.sleep(2)
+    # 进程检查用括号模式避免 pgrep 匹配到包装命令自身（docker exec bash -c 的命令行）
+    mapping = _ssh(PC3, "docker exec ros-noetic-dev bash -c "
+                        "'pgrep -f \"[h]2_mapping_headless\" >/dev/null && echo running || echo stopped'")
+    if mapping != "running":
+        _ssh_best_effort(PC3, "docker exec -d ros-noetic-dev bash -c '"
+                         + PC3_ROS_ENV
+                         + " && roslaunch /workspace/h2_extra/h2_mapping_headless.launch"
+                           " > /tmp/mapping.log 2>&1'", timeout=20)
+        started["mapping"] = True
+    bridge = _ssh(PC3, "docker exec ros-noetic-dev bash -c "
+                       "'pgrep -f \"[h]2_map_bridge\" >/dev/null && echo running || echo stopped'")
+    if bridge != "running":
+        # 建图栈可能刚拉起话题未就绪，桥先启动并自行等待数据
+        _ssh_best_effort(PC3, "docker exec -d ros-noetic-dev bash -c 'sleep 3; "
+                         + PC3_ROS_ENV
+                         + " && python3 /workspace/h2_extra/h2_map_bridge.py"
+                           " > /tmp/bridge.log 2>&1'", timeout=20)
+        started["bridge"] = True
+    for _ in range(12):
+        time.sleep(2)
+        if map_bridge_ready():
+            break
+    return {"ok": map_bridge_ready(), **started}
+
+
+def set_data_valve(name: str, enabled: bool) -> dict:
+    """切换数据接入阀门。开阀时若上游程序未运行则顺带拉起；
+    关阀只动阀门，从不停止程序。"""
+    if name not in DATA_VALVES:
+        raise FieldError(f"未知的数据阀门：{name}")
+    if not enabled:
+        DATA_VALVES[name] = False
+        return {"ok": True, "enabled": False}
+    DATA_VALVES[name] = True
+    starter = {"vision": start_pc2_vision, "mapping": start_pc3_mapping}[name]
+    result = starter()
+    result["enabled"] = True
+    return result

@@ -176,6 +176,80 @@ def test_hardware_map_route_serves_bridge_payload(settings, gateway, monkeypatch
         assert client.get("/api/field/map/bogus").status_code == 404
 
 
+@pytest.fixture
+def valves_default(monkeypatch):
+    """恢复阀门初始状态，避免用例间相互污染。"""
+    monkeypatch.setattr(field, "DATA_VALVES", {"vision": True, "mapping": True})
+
+
+def test_data_valve_close_gates_data_and_keeps_services(settings, gateway, monkeypatch, valves_default):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    monkeypatch.setattr(field, "vision", Mock(return_value={"available": True}))
+    monkeypatch.setattr(field, "vision_frame", Mock(return_value=(b"\x89PNG", 1, "image/png")))
+    monkeypatch.setattr(field, "map_data",
+                        Mock(return_value=(b"cloud", "application/octet-stream", {})))
+    with TestClient(hardware_app) as client:
+        # 默认开：数据端点正常
+        assert client.get("/api/field/vision").status_code == 200
+        assert client.get("/api/field/vision/frame").status_code == 200
+        assert client.get("/api/field/map/map").status_code == 200
+
+        # 关阀：只改状态，不触发任何拉起动作
+        stop_spy = Mock()
+        monkeypatch.setattr(field, "start_pc2_vision", stop_spy)
+        monkeypatch.setattr(field, "start_pc3_mapping", stop_spy)
+        closed = client.post("/api/field/data/vision", json={"enabled": False})
+        assert closed.status_code == 200 and closed.json() == {"ok": True, "enabled": False}
+        stop_spy.assert_not_called()
+
+        # 关闭后相机数据端点 503，雷达端点不受影响
+        assert "已关闭" in client.get("/api/field/vision").json()["detail"]
+        assert client.get("/api/field/vision/frame").status_code == 503
+        assert client.get("/api/field/map/map").status_code == 200
+
+
+def test_data_valve_open_pulls_services_once(settings, gateway, monkeypatch, valves_default):
+    hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
+    with TestClient(hardware_app) as client:
+        # 开阀触发对应服务的幂等拉起
+        monkeypatch.setattr(field, "start_pc2_vision", Mock(return_value={"ok": True, "already": False}))
+        opened = client.post("/api/field/data/vision", json={"enabled": True})
+        assert opened.status_code == 200
+        assert opened.json() == {"ok": True, "already": False, "enabled": True}
+
+        # 未知阀门名回错误而不是 500
+        bogus = client.post("/api/field/data/bogus", json={"enabled": True})
+        assert bogus.status_code == 200
+        assert bogus.json()["ok"] is False
+
+
+def test_start_pc2_vision_is_idempotent(monkeypatch):
+    monkeypatch.setattr(field, "_ssh", Mock(return_value="running"))
+    monkeypatch.setattr(field, "vision_frame_ready", Mock(return_value=True))
+    assert field.start_pc2_vision() == {"ok": True, "already": True}
+
+
+def test_start_pc3_mapping_starts_stopped_container(monkeypatch):
+    monkeypatch.setattr(field, "time", SimpleNamespace(sleep=lambda _: None))
+    monkeypatch.setattr(field, "_ensure_docker_group", Mock())
+    # 依次返回：容器未跑、容器存在、docker start 应答、建图栈未跑、桥未跑
+    states = iter(["stopped", "yes", "started", "stopped", "stopped"])
+    monkeypatch.setattr(field, "_ssh", Mock(side_effect=lambda *a, **k: next(states)))
+    monkeypatch.setattr(field, "_ssh_best_effort", Mock())
+    monkeypatch.setattr(field, "map_bridge_ready", Mock(return_value=True))
+    result = field.start_pc3_mapping()
+    assert result == {"ok": True, "container": True, "mapping": True, "bridge": True}
+
+
+def test_start_pc3_mapping_reports_missing_container(monkeypatch):
+    monkeypatch.setattr(field, "_ensure_docker_group", Mock())
+    states = iter(["stopped", "no"])
+    monkeypatch.setattr(field, "_ssh", Mock(side_effect=lambda *a, **k: next(states)))
+    result = field.start_pc3_mapping()
+    assert result["ok"] is False
+    assert "pc3-setup" in result["error"]
+
+
 def test_reconnect_requires_credentials_before_terminating_forwards(monkeypatch):
     process = Mock()
     monkeypatch.delenv("H2_FIELD_PASSWORD", raising=False)

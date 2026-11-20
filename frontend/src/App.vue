@@ -87,17 +87,51 @@ function resetViewAnchor() {
 
 // 链路管理区用指示灯显示各环节状态。
 // 每个按钮在操作员点击后执行对应操作，连接恢复也由操作员触发。
-interface FieldStatus { pc2_agent: boolean; forwards: Record<string, boolean>; gateway: boolean }
+interface FieldStatus { pc2_agent: boolean; vision_ready?: boolean; map_ready?: boolean; forwards: Record<string, boolean>; gateway: boolean; valves?: { vision?: boolean; mapping?: boolean } }
 const fieldStatus = ref<FieldStatus | null>(null)
 const fieldBusy = ref('')
 const fieldMessage = ref('')
+
+// 数据接入阀门：开=确保上游程序在跑并接入数据；关=只断数据，程序保持运行。
+// 状态以后端为准，状态轮询纠偏，点击立即本地生效。
+const visionValve = ref(true)
+const mappingValve = ref(true)
 
 async function pollField() {
   if (disposed || hardwareConfigured.value !== true) return
   try {
     const status = await request<FieldStatus>('/api/field/status', { cache: 'no-store' })
-    if (!disposed && hardwareConfigured.value === true) fieldStatus.value = status
+    if (!disposed && hardwareConfigured.value === true) {
+      fieldStatus.value = status
+      if (status.valves) {
+        visionValve.value = status.valves.vision !== false
+        mappingValve.value = status.valves.mapping !== false
+      }
+    }
   } catch { /* 查询失败时沿用上一次收到的状态。 */ }
+}
+
+async function toggleDataValve(kind: 'vision' | 'mapping') {
+  if (hardwareConfigured.value !== true || fieldBusy.value) return
+  const enabled = kind === 'vision' ? !visionValve.value : !mappingValve.value
+  fieldBusy.value = `data-${kind}`
+  fieldMessage.value = ''
+  try {
+    // 开阀可能触发程序拉起（建图最长约 25 秒），单独放宽超时
+    const result = await request<{ ok: boolean; enabled?: boolean; already?: boolean; error?: string }>(
+      `/api/field/data/${kind}`,
+      { method: 'POST', body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(45_000) })
+    if (kind === 'vision') visionValve.value = result.enabled !== false
+    else mappingValve.value = result.enabled !== false
+    if (!result.ok) fieldMessage.value = `失败：${result.error ?? '上游未就绪'}`
+    else if (result.enabled === false) fieldMessage.value = kind === 'vision' ? '相机数据已关闭（程序保持运行）' : '雷达数据已关闭（程序保持运行）'
+    else fieldMessage.value = result.already ? '程序已在运行，数据已接入' : '程序已拉起，数据已接入'
+  } catch (error) {
+    fieldMessage.value = `失败：${errorMessage(error)}`
+  } finally {
+    fieldBusy.value = ''
+    void pollField()
+  }
 }
 
 // 视觉识别：PC2 头部相机程序的结果经后端转发。该程序约 3Hz 输出，
@@ -122,11 +156,11 @@ const visionLive = computed(() => visionStatus.value?.available === true
   && (visionStatus.value.age_ms ?? Number.POSITIVE_INFINITY) <= visionFreshnessMs)
 
 async function pollVision() {
-  if (disposed || hardwareConfigured.value !== true) return
+  if (disposed || hardwareConfigured.value !== true || !visionValve.value) return
   try {
     const status = await request<VisionStatus>('/api/field/vision', { cache: 'no-store' })
     if (!disposed && hardwareConfigured.value === true) visionStatus.value = status
-  } catch { visionStatus.value = null }
+  } catch { /* 网络闪断时保留上一次结果。 */ }
 }
 
 const visionPerson = computed(() => visionLive.value ? visionStatus.value?.person ?? 0 : null)
@@ -142,6 +176,7 @@ function visionAgeText(ageMs: number): string {
   return hours < 24 ? `${hours} 小时前` : `${Math.round(hours / 24)} 天前`
 }
 const visionNote = computed(() => {
+  if (!visionValve.value) return '数据接入已关闭'
   const status = visionStatus.value
   if (status === null) return '无法获取视觉数据'
   if (status.available !== true) return 'PC2 视觉接口不可用'
@@ -159,7 +194,7 @@ const visionFrameAgeMs = ref<number | null>(null)
 let visionFrameObjectUrl: string | undefined
 
 async function pollVisionFrame() {
-  if (disposed || hardwareConfigured.value !== true) return
+  if (disposed || hardwareConfigured.value !== true || !visionValve.value) return
   try {
     const response = await fetch('/api/field/vision/frame', { cache: 'no-store' })
     if (!response.ok) return  // 来源暂不可用时保留上一帧，状态由年龄提示。
@@ -176,6 +211,7 @@ async function pollVisionFrame() {
 }
 
 const visionFrameNote = computed(() => {
+  if (!visionValve.value) return '数据接入已关闭'
   const age = visionFrameAgeMs.value
   if (visionFrameUrl.value === null) return '等待相机画面接入'
   if (age == null) return '机器人摄像头'
@@ -457,6 +493,8 @@ onBeforeUnmount(() => {
           <span :class="['field-light', { on: fieldStatus?.gateway }]"><i></i>PC3 网关</span>
           <span :class="['field-light', { on: fieldStatus?.forwards?.['15051'] }]"><i></i>状态转发</span>
           <span :class="['field-light', { on: fieldStatus?.forwards?.['15052'] }]"><i></i>遥控转发</span>
+          <span :class="['field-light', { on: fieldStatus?.vision_ready }]"><i></i>相机数据</span>
+          <span :class="['field-light', { on: fieldStatus?.map_ready }]"><i></i>雷达数据</span>
         </div>
         <div class="field-actions">
           <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
@@ -512,17 +550,20 @@ onBeforeUnmount(() => {
           <section v-if="hardwareMode" class="panel hardware-map" aria-labelledby="hardware-map-heading">
             <div class="panel-heading">
               <div><h2 id="hardware-map-heading">地图显示</h2><span class="panel-caption">FastLIO 实时建图 · 现场点云与机器人位姿</span></div>
+              <button class="data-valve" :class="{ on: mappingValve }" type="button" :disabled="!!fieldBusy" data-testid="valve-mapping" @click="toggleDataValve('mapping')">{{ fieldBusy === 'data-mapping' ? '启动中…' : mappingValve ? '⏻ 开' : '⏻ 关' }}</button>
             </div>
-            <MapPanel />
+            <MapPanel v-if="mappingValve" />
+            <div v-else class="monitor-placeholder">雷达数据接入已关闭</div>
           </section>
           <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? (poseAnchor ? '三维位姿 · 视图原点已重置' : '三维位姿 · 开机点坐标系（重启归零）') : '三维位姿与任务路线' }}</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span><button v-if="hardwareMode" class="scene-reset" type="button" :disabled="!robot?.pose" data-testid="scene-reset" @click="resetViewAnchor">{{ poseAnchor ? '再次重置' : '重置视图' }}</button></span></div><RoomScene :robot="displayRobot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span v-if="poseAnchor">视图原点已重置（当前位置 = 场景中心）· 视图坐标 {{ displayRobot?.pose ? displayRobot.pose.x.toFixed(2) + ', ' + displayRobot.pose.y.toFixed(2) + ' m' : '—' }}</span><span v-else>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
               <div><h2 id="hardware-image-heading">图像显示</h2><span class="panel-caption">{{ visionFrameNote }}</span></div>
+              <button class="data-valve" :class="{ on: visionValve }" type="button" :disabled="!!fieldBusy" data-testid="valve-vision" @click="toggleDataValve('vision')">{{ fieldBusy === 'data-vision' ? '启动中…' : visionValve ? '⏻ 开' : '⏻ 关' }}</button>
             </div>
-            <img v-if="visionFrameUrl" class="camera-frame" :src="visionFrameUrl" alt="机器人摄像头实时画面（带检测框）" />
-            <div v-else class="monitor-placeholder">等待相机画面接入</div>
+            <img v-if="visionValve && visionFrameUrl" class="camera-frame" :src="visionFrameUrl" alt="机器人摄像头实时画面（带检测框）" />
+            <div v-else class="monitor-placeholder">{{ visionValve ? '等待相机画面接入' : '相机数据接入已关闭' }}</div>
           </section>
         </div>
 
@@ -572,6 +613,10 @@ onBeforeUnmount(() => {
 .vision-foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 主区顶部横条显示链路状态，并提供手动触发的 SSH 操作，为侧栏留出遥控空间。 */
 .field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
+/* 数据阀门开关：电源式圆钮，放在各数据面板标题栏右侧 */
+.data-valve { flex-shrink: 0; border: 1px solid #b7c6cf; background: #fff; color: #6a7f8d; border-radius: 999px; padding: 5px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.data-valve.on { border-color: #35a0a4; color: #0f6f72; background: #e8f6f6; }
+.data-valve:disabled { opacity: .5; cursor: not-allowed; }
 .field-strip-title { color: #4e6675; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
 .field-lights { display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .field-light { display: flex; align-items: center; gap: 6px; color: #8a9dab; font-size: 11px; white-space: nowrap; }

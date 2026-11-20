@@ -142,11 +142,15 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     @field_routes.get("/vision")
     def field_vision():
+        if not field.DATA_VALVES.get("vision", True):
+            raise ServiceError(503, "相机数据接入已关闭")
         # 视觉接口自身已经把不可达折叠为 available=False，这里不再包错。
         return field.vision()
 
     @field_routes.get("/vision/frame")
     def field_vision_frame():
+        if not field.DATA_VALVES.get("vision", True):
+            raise ServiceError(503, "相机数据接入已关闭")
         frame = field.vision_frame()
         if frame is None:
             # 预览帧尚不存在（视觉程序未运行或 PC2 离线），保留 503 语义供前端识别。
@@ -160,6 +164,8 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     @field_routes.get("/map/{kind}")
     def field_map(kind: str):
         # 建图桥数据转发（点云/位姿/轨迹），供「地图显示」模块轮询。
+        if not field.DATA_VALVES.get("mapping", True):
+            raise ServiceError(503, "雷达数据接入已关闭")
         if kind not in ("map", "pose", "path"):
             raise ServiceError(404, "未知的地图数据类型")
         payload = field.map_data(kind)
@@ -168,6 +174,18 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
         data, content_type, extra = payload
         return Response(content=data, media_type=content_type,
                         headers={"Cache-Control": "no-store", **extra})
+
+    class ValveRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        enabled: bool
+
+    @field_routes.post("/data/{name}")
+    def field_data_valve(name: str, payload: ValveRequest):
+        # 同步处理器：开阀可能触发程序拉起（建图最长约 25 秒），在线程池中执行。
+        try:
+            return field.set_data_valve(name, payload.enabled)
+        except Exception as error:
+            return {"ok": False, "enabled": False, "error": str(error)[:200]}
 
     if settings.hardware_teleop:
         app.include_router(field_routes)
