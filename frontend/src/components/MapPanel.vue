@@ -218,7 +218,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.map-canvas { width: 100%; height: clamp(240px, 34vh, 430px); border-radius: 6px; overflow: hidden; background: #0d141a; }
-.map-canvas :deep(canvas) { display: block; }
+.map-canvas { position: relative; width: 100%; height: clamp(240px, 34vh, 430px); border-radius: 6px; overflow: hidden; background: #0d141a; }
+/* canvas 内联像素高度会反向撑大容器的最小内容尺寸，改为绝对定位脱离文档流，
+   容器高度完全由布局决定，ResizeObserver 负责让渲染器跟随实际尺寸。 */
+.map-canvas :deep(canvas) { position: absolute; inset: 0; display: block; }
 .map-status { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; color: #5f7482; font-size: 12px; }
 </style>

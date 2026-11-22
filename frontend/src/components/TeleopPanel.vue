@@ -338,7 +338,7 @@ function number(value: number | undefined, digits = 2) {
         </button>
         <button class="teleop-stop" type="button" :disabled="!active" data-testid="teleop-stop" @click="stopMotion(true)"><span aria-hidden="true">■</span> 停步</button>
       </div>
-      <div v-if="hardware && !compact" class="teleop-telemetry">
+      <div v-if="hardware" class="teleop-telemetry">
         <div><small>最近指令应答</small><strong data-testid="teleop-motion">{{ robotMotion }}</strong></div>
         <div><small>状态机 ID</small><strong>{{ robotState?.fsm_id ?? '—' }}</strong></div>
         <div><small>运动模式</small><strong>{{ robotState?.fsm_mode ?? '—' }}</strong></div>
@@ -403,7 +403,7 @@ function number(value: number | undefined, digits = 2) {
 .teleop-panel.compact .teleop-badge { background: rgba(255, 255, 255, .06); border-color: rgba(255, 255, 255, .14); color: #9fb3c4; }
 .teleop-panel.compact .teleop-badge.active { color: #7fe0d2; border-color: rgba(53, 161, 140, .5); background: rgba(22, 136, 139, .15); }
 .teleop-panel.compact .teleop-body { padding: 10px 11px 9px; }
-.teleop-panel.compact .teleop-pad { margin: 10px auto 12px; column-gap: 4px; }
+.teleop-panel.compact .teleop-pad { margin: 8px auto 10px; column-gap: 4px; }
 .teleop-panel.compact .teleop-direction,
 .teleop-panel.compact .teleop-stop {
   gap: 3px;
@@ -414,6 +414,12 @@ function number(value: number | undefined, digits = 2) {
   color: #cfe0ea;
 }
 .teleop-panel.compact .teleop-direction span { font-size: 14px; }
+/* 侧栏加宽后紧凑面板也显示真机遥测反馈，沿用侧栏深色配色；窄栏改为逐行排布避免标签折行 */
+.teleop-panel.compact .teleop-telemetry { display: flex; flex-direction: column; gap: 7px; background: rgba(255, 255, 255, .05); border-color: rgba(255, 255, 255, .12); }
+.teleop-panel.compact .teleop-telemetry div { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.teleop-panel.compact .teleop-telemetry div small { margin-bottom: 0; }
+.teleop-panel.compact .teleop-telemetry small { color: #7d92a3; }
+.teleop-panel.compact .teleop-telemetry strong { color: #cfe0ea; white-space: nowrap; }
 .teleop-panel.compact .teleop-direction:disabled,
 .teleop-panel.compact .teleop-stop:disabled {
   color: #5d7185;

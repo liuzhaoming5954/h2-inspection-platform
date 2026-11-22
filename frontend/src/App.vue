@@ -7,6 +7,7 @@ import EnvironmentChart from './components/EnvironmentChart.vue'
 import TeleopPanel from './components/TeleopPanel.vue'
 import DemoPanel from './components/DemoPanel.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
+import { demoBusy } from './demoStore'
 
 const defaultPoints: RoutePoint[] = [
   { id: 'p01', label: 'A01机柜', x: -3, y: -1.8 },
@@ -31,11 +32,19 @@ const serviceLoading = ref(true)
 const robotLoading = ref(true)
 const loading = computed(() => serviceLoading.value || robotLoading.value)
 const teleopSession = ref(false)
-// 演示编排占用运动租约时（拉起/武装/执行）禁用手动遥控：单一租约互斥的界面提示
-const demoActive = ref(false)
-function setDemoActive(active: boolean) {
-  demoActive.value = active
+// 演示编排占用运动租约时（拉起/武装/执行）禁用手动遥控：单一租约互斥的界面提示。
+// 状态来自 demoStore，侧栏控制组与主区状态条共用同一份数据。
+const demoActive = demoBusy
+// 侧栏抽屉：手动呼出/收起，不做鼠标移开自动隐藏。
+// 遥控会话或演示执行期间禁止收起——方向键消失时机器人可能仍在运动。
+const sidebarOpen = ref(false)
+const sidebarToggleDisabled = computed(() => teleopSession.value || demoBusy.value)
+function toggleSidebar() {
+  if (sidebarOpen.value && sidebarToggleDisabled.value) return
+  sidebarOpen.value = !sidebarOpen.value
 }
+// 演示开始（准备/武装/执行）时自动呼出侧栏：停止演示按钮与执行进度必须可见可达
+watch(demoBusy, busy => { if (busy) sidebarOpen.value = true }, { immediate: true })
 const submitting = ref(false)
 const stopping = ref(false)
 const reporting = ref(false)
@@ -76,22 +85,6 @@ const samples = computed(() => selectedTask.value?.samples ?? [])
 const latestSample = computed(() => samples.value.at(-1))
 const reports = computed(() => selectedTask.value?.reports ?? [])
 const battery = computed(() => robot.value?.battery_percent ?? robot.value?.battery)
-// 三维视图通过保存当前位姿作为基准来重置显示原点。
-// 场景显示实时位姿相对基准的偏移，重置时模型会移到场景中心。
-// 机器人里程计仍以开机点为原点，位姿卡继续显示原始遥测值。
-const poseAnchor = ref<{ x: number; y: number; yaw: number } | null>(null)
-const displayRobot = computed(() => {
-  const current = robot.value
-  const anchor = poseAnchor.value
-  const pose = current?.pose
-  if (!current || !anchor || !pose) return current ?? null
-  return { ...current, pose: { x: pose.x - anchor.x, y: pose.y - anchor.y, yaw: pose.yaw - anchor.yaw } }
-})
-function resetViewAnchor() {
-  const pose = robot.value?.pose
-  if (pose) poseAnchor.value = { x: pose.x, y: pose.y, yaw: pose.yaw }
-}
-
 // 链路管理区用指示灯显示各环节状态。
 // 每个按钮在操作员点击后执行对应操作，连接恢复也由操作员触发。
 interface FieldStatus { pc2_agent: boolean; vision_ready?: boolean; map_ready?: boolean; asr_ready?: boolean; forwards: Record<string, boolean>; gateway: boolean; valves?: { vision?: boolean; mapping?: boolean; asr?: boolean } }
@@ -524,29 +517,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside class="sidebar" :class="{ 'hardware-sidebar': hardwareMode }">
-      <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2 真机遥控' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'TELEOP CONSOLE' : 'INSPECTION CONSOLE' }}</span></span></a>
+  <div class="app-shell" :class="{ 'hardware-shell': hardwareMode, 'hardware-drawer-open': hardwareMode && sidebarOpen }">
+    <aside class="sidebar" :class="{ 'hardware-sidebar': hardwareMode, 'drawer-open': hardwareMode && sidebarOpen }">
+      <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2巡检平台' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'INSPECTION PLATFORM' : 'INSPECTION CONSOLE' }}</span></span></a>
       <template v-if="!hardwareMode">
         <div class="workspace-label">验证工作区</div>
         <div class="nav-item active"><span class="nav-symbol">▦</span> 巡检验证台 <span class="nav-selected"></span></div>
       </template>
       <TeleopPanel v-if="modeKnown && hardwareMode" class="sidebar-teleop" :class="{ 'lease-held': teleopSession }" compact :robot="robot" :hardware="true" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
-      <template v-if="modeKnown && !hardwareMode">
-        <div class="sidebar-section">验证链路</div>
-        <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
-        <div class="chain-item"><span class="chain-num">02</span><span>机器人执行反馈</span></div>
-        <div class="chain-item"><span class="chain-num">03</span><span>采集数据与复核</span></div>
-        <div class="chain-item"><span class="chain-num">04</span><span>报告生成与导出</span></div>
-      </template>
-      <div class="sidebar-foot"><span class="platform-pill">x86_64 / Ubuntu</span><p>本地技术验证环境</p><small v-if="modeKnown">{{ hardwareMode ? 'H2 HARDWARE' : 'SIMULATED ROBOT' }} · v0.1</small></div>
-    </aside>
-
-    <main class="main-content">
-      <header class="topbar"><div class="breadcrumb">{{ hardwareMode ? 'H2 真机' : '巡检管理' }} <span>/</span> 技术验证台</div><div class="topbar-right"><span class="env-tag">开发验证</span><time>{{ clock.toLocaleString('zh-CN', { hour12: false }) }}</time><span class="avatar">验</span></div></header>
-      <div class="page-content">
-      <section v-if="hardwareConfigured === true" class="field-strip" aria-label="链路管理">
-        <span class="field-strip-title">链路管理</span>
+      <DemoPanel v-if="modeKnown && hardwareMode" hardware section="controls" class="sidebar-demo" />
+      <!-- 链路管理：指示灯与恢复按钮移入侧栏，运行状态带仍在主区 -->
+      <div v-if="modeKnown && hardwareMode" class="sidebar-field" data-testid="field-card" aria-label="链路管理">
+        <div class="sidebar-field-head"><span class="sidebar-field-title">链路管理</span></div>
         <div class="field-lights">
           <span :class="['field-light', { on: fieldStatus?.pc2_agent }]"><i></i>PC2 代理</span>
           <span :class="['field-light', { on: fieldStatus?.gateway }]"><i></i>PC3 网关</span>
@@ -558,52 +540,59 @@ onBeforeUnmount(() => {
         </div>
         <div class="field-actions">
           <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-reconnect" @click="fieldAction('reconnect-forwards')">{{ fieldBusy === 'reconnect-forwards' ? '重连中…' : '重连转发' }}</button>
-          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2 代理' }}</button>
-          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3 网关' }}</button>
+          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc2" @click="fieldAction('start-pc2')">{{ fieldBusy === 'start-pc2' ? '启动中…' : '启动 PC2' }}</button>
+          <button class="field-button" type="button" :disabled="!!fieldBusy" data-testid="field-start-pc3" @click="fieldAction('start-pc3')">{{ fieldBusy === 'start-pc3' ? '启动中…' : '启动 PC3' }}</button>
         </div>
         <small v-if="fieldMessage" class="field-message" role="status">{{ fieldMessage }}</small>
-      </section>
-        <div class="page-heading"><div><div class="eyebrow">{{ hardwareMode ? 'H2 LOCOMOTION' : 'ROBOT INSPECTION / PROOF OF CONCEPT' }}</div><h1>{{ hardwareMode ? 'H2 真机遥控验证台' : '巡检技术验证台' }}</h1><p>{{ hardwareMode ? '通过宇树高层运动服务验证前进、后退、转向和停步。' : '连接任务、机器人与巡检证据，验证完整业务链路。' }}</p></div><button class="api-link" type="button" @click="refreshAll"><span>↻</span> 刷新状态</button></div>
-        <div v-if="hardwareMode" class="validation-banner hardware-banner"><span class="banner-icon">i</span><div><strong>H2 真机模式</strong><span>方向指令会驱动实际机器人。停步请求获应答后，请在现场确认机器人停稳。</span></div></div>
-        <div v-else-if="modeKnown" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
+      </div>
+      <template v-if="modeKnown && !hardwareMode">
+        <div class="sidebar-section">验证链路</div>
+        <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
+        <div class="chain-item"><span class="chain-num">02</span><span>机器人执行反馈</span></div>
+        <div class="chain-item"><span class="chain-num">03</span><span>采集数据与复核</span></div>
+        <div class="chain-item"><span class="chain-num">04</span><span>报告生成与导出</span></div>
+      </template>
+      <div class="sidebar-foot"><span class="platform-pill">x86_64 / Ubuntu</span><p>本地技术验证环境</p><small v-if="modeKnown">{{ hardwareMode ? 'H2 HARDWARE' : 'SIMULATED ROBOT' }} · v0.1</small></div>
+    </aside>
+
+    <!-- 抽屉把手：悬浮在屏幕左上角；呼出后随侧栏右移停靠在侧栏边缘；
+         遥控会话或演示执行期间禁用收起（方向键消失时机器人可能仍在运动） -->
+    <button v-if="modeKnown && hardwareMode" class="sidebar-toggle" type="button" data-testid="sidebar-toggle"
+            :class="{ open: sidebarOpen }"
+            :disabled="sidebarOpen && sidebarToggleDisabled"
+            :title="sidebarOpen ? (sidebarToggleDisabled ? '遥控会话或演示执行期间不能收起' : '收起控制栏') : '呼出控制栏'"
+            @click="toggleSidebar">
+      <span class="sidebar-toggle-icon" aria-hidden="true"><i></i><i></i><i></i></span>
+    </button>
+
+    <main class="main-content">
+      <!-- 真机模式去掉顶栏（面包屑/时钟/头像均为纯展示），把手并入链路管理条；模拟模式维持原顶栏 -->
+      <header v-if="!hardwareMode" class="topbar">
+        <div class="topbar-left">
+          <div class="breadcrumb">巡检管理 <span>/</span> 技术验证台</div>
+        </div>
+        <div class="topbar-right"><span class="env-tag">开发验证</span><time>{{ clock.toLocaleString('zh-CN', { hour12: false }) }}</time><span class="avatar">验</span></div>
+      </header>
+      <div class="page-content" :class="{ 'hardware-page': hardwareMode }">
+        <!-- 真机模式不再渲染页头标题行：左上角品牌「H2巡检平台」已标识页面，
+             手动刷新由状态轮询承担，省出的高度全部留给工作区；模拟模式维持原版页头。 -->
+        <div v-if="!hardwareMode" class="page-heading"><div><div class="eyebrow">ROBOT INSPECTION / PROOF OF CONCEPT</div><h1>巡检技术验证台</h1><p>连接任务、机器人与巡检证据，验证完整业务链路。</p></div><button class="api-link" type="button" @click="refreshAll"><span>↻</span> 刷新状态</button></div>
+        <div v-if="modeKnown && !hardwareMode" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
+        <!-- 真机状态带：连接、运动服务、电量、温湿度和视觉识别一行内联摘要；链路管理在侧栏。 -->
+        <section v-if="hardwareMode" class="status-strip" aria-label="真机连接与遥控状态">
+          <span class="status-item"><i :class="['status-dot', connected ? 'online' : 'offline']"></i><strong>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</strong><small>{{ connected ? (robot?.robot_id ?? 'H2 真机') : '等待业务服务和网关' }}</small></span>
+          <span class="status-item"><label>运动服务</label><strong :title="`最近查询 ${lastSync || '—'}`">{{ hardwareState }}</strong></span>
+          <span class="status-item"><label>电量</label><strong>{{ battery == null ? '—' : battery.toFixed(0) }}<i v-if="battery != null">%</i></strong><span class="mini-battery"><span :style="{ width: `${battery ?? 0}%` }"></span></span></span>
+          <span class="status-item"><label>温湿度</label><strong>{{ environmentTemperature != null && environmentHumidity != null ? environmentTemperature.toFixed(1) + '℃ / ' + environmentHumidity.toFixed(1) + '%RH' : '—' }}</strong><small :title="environmentNote">{{ environmentNote }}</small></span>
+          <span class="status-item"><label>视觉</label><strong>{{ visionPerson ?? '—' }} 人 · {{ visionLedTotal ?? '—' }} 灯</strong><small :title="visionQr ?? visionNote">{{ visionNote }}</small></span>
+        </section>
         <div v-if="connectionError" class="connection-alert" role="alert"><strong>服务连接异常</strong><span>{{ connectionError }}</span><button @click="refreshAll">重新连接</button></div>
 
-        <section v-if="modeKnown" class="metrics" :class="{ 'hardware-metrics': hardwareMode }" :aria-label="hardwareMode ? '真机连接与遥控状态' : '机器人与任务概况'">
-          <div class="metric-card"><div class="metric-top"><span>机器人连接</span><span class="metric-icon">⌁</span></div><div class="metric-value connection-value"><span :class="['status-dot', connected ? 'online' : 'offline']"></span>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</div><div class="metric-foot">{{ connected ? (robot?.robot_id ?? (hardwareMode ? 'H2 真机' : 'H2 模拟机器人')) : '等待业务服务和网关' }}</div></div>
-          <div v-if="hardwareMode" class="metric-card">
-            <div class="metric-top"><span>高层运动服务</span><span class="metric-icon">◎</span></div>
-            <div class="metric-value">{{ hardwareState }}</div>
-            <div class="metric-foot">最近查询 {{ lastSync || '—' }}</div>
-          </div>
-          <div v-if="hardwareMode" class="metric-card">
-            <div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div>
-            <div class="metric-value">{{ battery == null ? '—' : battery.toFixed(0) }}<span v-if="battery != null" class="metric-unit">%</span></div>
-            <div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div>
-          </div>
-          <div v-if="hardwareMode" class="metric-card">
-            <div class="metric-top"><span>环境温湿度</span><span class="metric-icon">♧</span></div>
-            <div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div>
-            <div class="metric-foot">{{ environmentNote }}</div>
-          </div>
-          <div v-if="hardwareMode" class="metric-card">
-            <div class="metric-top"><span>视觉识别</span><span class="metric-icon">◉</span></div>
-            <div class="sample-values"><strong>{{ visionPerson ?? '—' }}<span>人</span></strong><i></i><strong>{{ visionLedTotal ?? '—' }}<span>灯</span></strong></div>
-            <div class="metric-foot vision-foot" :title="visionQr ?? visionNote">{{ visionNote }}</div>
-          </div>
-          <div v-if="hardwareMode" class="metric-card">
-            <div class="metric-top"><span>机器人位姿</span><span class="metric-icon">⌖</span></div>
-            <div v-if="robot?.pose" class="metric-value pose-value">
-              <span>x {{ robot.pose.x.toFixed(2) }}　y {{ robot.pose.y.toFixed(2) }} m</span>
-              <span>yaw {{ (robot.pose.yaw * 180 / Math.PI).toFixed(0) }}°</span>
-            </div>
-            <div v-else class="metric-value">—</div>
-            <div class="metric-foot">开机点坐标系 · 实时里程计</div>
-          </div>
-          <template v-else>
-            <div class="metric-card"><div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div><div class="metric-value">{{ battery === undefined ? '—' : battery.toFixed(0) }}<span class="metric-unit">%</span><span class="small-status">{{ robot?.status ? stateNames[robot.status] ?? robot.status : '状态未知' }}</span></div><div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div></div>
-            <div class="metric-card"><div class="metric-top"><span>任务完成进度</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ progress.toFixed(0) }}<span class="metric-unit">%</span><el-tag size="small" :type="stateTone" effect="light">{{ taskState }}</el-tag></div><div class="metric-foot">已采集 {{ samples.length }} / {{ points.length }} 个巡检点</div></div>
-            <div class="metric-card"><div class="metric-top"><span>最近环境采样</span><span class="metric-icon">♧</span></div><div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div><div class="metric-foot">{{ environmentNote }}</div></div>
-          </template>
+        <section v-if="modeKnown && !hardwareMode" class="metrics" aria-label="机器人与任务概况">
+          <div class="metric-card"><div class="metric-top"><span>机器人连接</span><span class="metric-icon">⌁</span></div><div class="metric-value connection-value"><span :class="['status-dot', connected ? 'online' : 'offline']"></span>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</div><div class="metric-foot">{{ connected ? (robot?.robot_id ?? 'H2 模拟机器人') : '等待业务服务和网关' }}</div></div>
+          <div class="metric-card"><div class="metric-top"><span>机器人电量</span><span class="metric-icon battery-icon">▱</span></div><div class="metric-value">{{ battery === undefined ? '—' : battery.toFixed(0) }}<span class="metric-unit">%</span><span class="small-status">{{ robot?.status ? stateNames[robot.status] ?? robot.status : '状态未知' }}</span></div><div class="battery-track"><span :style="{width: `${battery ?? 0}%`}"></span></div></div>
+          <div class="metric-card"><div class="metric-top"><span>任务完成进度</span><span class="metric-icon">◎</span></div><div class="metric-value">{{ progress.toFixed(0) }}<span class="metric-unit">%</span><el-tag size="small" :type="stateTone" effect="light">{{ taskState }}</el-tag></div><div class="metric-foot">已采集 {{ samples.length }} / {{ points.length }} 个巡检点</div></div>
+          <div class="metric-card"><div class="metric-top"><span>最近环境采样</span><span class="metric-icon">♧</span></div><div class="sample-values"><strong>{{ environmentTemperature != null ? environmentTemperature.toFixed(1) : '—' }}<span>℃</span></strong><i></i><strong>{{ environmentHumidity != null ? environmentHumidity.toFixed(1) : '—' }}<span>%RH</span></strong></div><div class="metric-foot">{{ environmentNote }}</div></div>
         </section>
 
         <div v-if="modeKnown" class="workspace-grid" :class="{ 'hardware-workspace': hardwareMode }">
@@ -615,13 +604,13 @@ onBeforeUnmount(() => {
             <MapPanel v-if="mappingValve" />
             <div v-else class="monitor-placeholder">雷达数据接入已关闭</div>
           </section>
-          <section class="panel scene-panel"><div class="panel-heading"><div><h2>{{ hardwareMode ? '机器人实时位姿' : '机房巡检场景' }}</h2><span class="panel-caption">{{ hardwareMode ? (poseAnchor ? '三维位姿 · 视图原点已重置' : '三维位姿 · 开机点坐标系（重启归零）') : '三维位姿与任务路线' }}</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span><button v-if="hardwareMode" class="scene-reset" type="button" :disabled="!robot?.pose" data-testid="scene-reset" @click="resetViewAnchor">{{ poseAnchor ? '再次重置' : '重置视图' }}</button></span></div><RoomScene :robot="displayRobot" :points="hardwareMode ? [] : points" :progress="hardwareMode ? 0 : progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span v-if="poseAnchor">视图原点已重置（当前位置 = 场景中心）· 视图坐标 {{ displayRobot?.pose ? displayRobot.pose.x.toFixed(2) + ', ' + displayRobot.pose.y.toFixed(2) + ' m' : '—' }}</span><span v-else>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
+          <section v-if="!hardwareMode" class="panel scene-panel"><div class="panel-heading"><div><h2>机房巡检场景</h2><span class="panel-caption">三维位姿与任务路线</span></div><span class="heading-actions"><span class="view-badge">3D 实时视图</span></span></div><RoomScene :robot="robot" :points="points" :progress="progress" /><div class="scene-status"><span><i :class="['status-dot', connected ? 'online' : 'offline']"></i> {{ connected ? '网关状态同步中' : '网关未连接' }}</span><span>最近同步 {{ lastSync || '—' }} <b>·</b> 模型为验证示意</span></div></section>
           <TeleopPanel v-if="!hardwareMode" :robot="robot" :hardware="hardwareMode" :telemetry-available="robotAvailable" :disabled-reason="teleopDisabledReason" @session-active="setTeleopSession" />
           <section v-if="modeKnown && !hardwareMode" class="panel demo-panel-sim" aria-labelledby="demo-sim-heading">
             <div class="panel-heading">
               <div><h2 id="demo-sim-heading">巡检演示（干跑）</h2><span class="panel-caption">路线编辑与执行器干跑 · 语音编排需真机模式</span></div>
             </div>
-            <DemoPanel :hardware="false" @active-change="setDemoActive" />
+            <DemoPanel :hardware="false" />
           </section>
           <section v-if="hardwareMode" class="panel hardware-image" aria-labelledby="hardware-image-heading">
             <div class="panel-heading">
@@ -637,16 +626,10 @@ onBeforeUnmount(() => {
               <button class="data-valve" :class="{ on: asrValve }" type="button" :disabled="!!fieldBusy" data-testid="valve-asr" @click="toggleDataValve('asr')">{{ fieldBusy === 'data-asr' ? '启动中…' : asrValve ? '⏻ 开' : '⏻ 关' }}</button>
             </div>
             <div v-if="asrValve" ref="asrLogEl" class="asr-log">
-              <p v-for="item in asrItems" :key="item.id"><time>{{ new Date(item.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) }}</time>{{ item.text }}</p>
+              <p v-for="(item, index) in asrItems" :key="item.id" :class="{ latest: index === asrItems.length - 1 }"><time>{{ new Date(item.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) }}</time>{{ item.text }}</p>
               <p v-if="!asrItems.length" class="asr-empty">等待语音输入 —— 对着机器人上的麦克风说话</p>
             </div>
             <div v-else class="monitor-placeholder">语音识别已关闭</div>
-          </section>
-          <section v-if="hardwareMode" class="panel hardware-demo" aria-labelledby="hardware-demo-heading">
-            <div class="panel-heading">
-              <div><h2 id="hardware-demo-heading">巡检演示</h2><span class="panel-caption">一键拉起模块 · 语音「开始」触发 · 路线闭环执行</span></div>
-            </div>
-            <DemoPanel :hardware="true" @active-change="setDemoActive" />
           </section>
         </div>
 
@@ -663,7 +646,7 @@ onBeforeUnmount(() => {
 
         <section v-if="tasks.length" class="panel history-panel"><div class="panel-heading"><div><h2>验证任务记录</h2><span class="panel-caption">任务状态与数据持久化</span></div><span class="count-pill">{{ tasks.length }} 项</span></div><div class="history-list"><button v-for="task in tasks.slice(0, 8)" :key="task.id" :class="['history-item', {selected: selectedTask?.id === task.id}]" @click="selectTask(task)"><span class="history-name">{{ task.name }}<small>{{ task.id }}</small></span><span>{{ displayTime(task.created_at) }}</span><span class="history-status">{{ stateNames[task.status] ?? task.status }}</span><span>查看 →</span></button></div></section>
         </template>
-        <footer class="page-footer"><span>H2 巡检运维 · 技术验证环境</span><span>Vue 3 <i>·</i> FastAPI <i>·</i> PostgreSQL <i>·</i> gRPC</span></footer>
+        <footer v-if="!hardwareMode" class="page-footer"><span>H2 巡检运维 · 技术验证环境</span><span>Vue 3 <i>·</i> FastAPI <i>·</i> PostgreSQL <i>·</i> gRPC</span></footer>
       </div>
     </main>
     <el-dialog v-if="!hardwareMode" v-model="reviewOpen" title="人工复核" width="520px" :close-on-click-modal="false"><p class="review-description">为当前任务记录复核意见，原始采样数据将保留。</p><el-input v-model="reviewNote" type="textarea" :rows="5" maxlength="2000" show-word-limit placeholder="例如：已核对三个巡检点的合成采样和图片，数据关联正确。" aria-label="复核意见" /><template #footer><el-button @click="reviewOpen = false">取消</el-button><el-button type="primary" :disabled="!reviewNote.trim()" :loading="savingReview" @click="saveReview">保存复核</el-button></template></el-dialog>
@@ -671,58 +654,113 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 真机模式紧凑化：侧栏收窄、顶部状态收成一行，把纵向空间让给地图/图像/语音/演示。
+   语音转写为通高右栏，最新一句大字显示。 */
+/* 侧栏抽屉：默认收起（滑出屏幕），把手按钮手动呼出；呼出时主区随之让出 240px。
+   只在真机模式宽屏生效；visibility 延迟切换保证收起动画完成后内容不可聚焦。 */
+@media (min-width: 1201px) {
+  .hardware-sidebar { width: 240px; transform: translateX(-100%); visibility: hidden; transition: transform .25s ease, visibility 0s linear .25s; }
+  .hardware-drawer-open .hardware-sidebar { transform: translateX(0); visibility: visible; transition: transform .25s ease; }
+  .hardware-shell > .main-content { margin-left: 0; width: 100%; transition: margin-left .25s ease, width .25s ease; }
+  .hardware-drawer-open > .main-content { margin-left: 240px; width: calc(100% - 240px); }
+}
+.hardware-page { padding-top: 12px; }
+/* 侧栏链路卡：指示灯与恢复按钮从主区移入，沿用深色卡片语言 */
+.sidebar-field { flex-shrink: 0; margin: 8px -6px 0; padding: 12px 13px; background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .1); border-top: 3px solid rgba(105, 180, 176, .55); border-radius: 8px; }
+.sidebar-field-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.sidebar-field-title { color: #e6eef5; font-size: 13px; font-weight: 600; }
+/* 主区状态带：连接、运动服务、电量、温湿度和视觉识别一行内联摘要。 */
+.status-strip { display: flex; align-items: center; margin-bottom: 14px; padding: 8px 6px; border: 1px solid #e4eaf0; border-radius: 8px; background: #fff; box-shadow: 0 2px 4px #283e5a02; overflow: hidden; }
+.status-item { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 15px; white-space: nowrap; }
+.status-item + .status-item { border-left: 1px solid #eef2f5; }
+.status-item label { flex-shrink: 0; color: #7f8c98; font-size: 11px; }
+.status-item strong { color: #263e4b; font-size: 14px; font-weight: 600; letter-spacing: -.2px; }
+.status-item strong i { font-style: normal; font-size: 10px; color: #9ba9b3; margin-left: 1px; font-weight: 400; }
+.status-item small { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #94a0aa; font-size: 10px; }
+.mini-battery { flex-shrink: 0; width: 56px; height: 4px; border-radius: 3px; background: #eff3f5; overflow: hidden; }
+.mini-battery span { display: block; height: 100%; border-radius: 3px; background: #7eb9a4; max-width: 100%; }
+/* 工作区三列：地图/图像/语音转写通高并排；演示的控制与进度在侧栏，不再占主区。
+   行随视口高度伸缩（min-content 下限保证最小可读尺寸）。 */
 .hardware-workspace {
-  align-items: start;
-  grid-template-areas: 'map teleop' 'image teleop' 'asr teleop' 'demo teleop';
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(280px, 320px);
+  grid-template-rows: minmax(min-content, 1fr);
+  grid-template-areas: 'map image asr';
+  gap: 12px;
+  margin-bottom: 12px;
+  /* 76px ≈ 页首留白 12 + 状态带 38 与下边距 14、工作区下边距 12，工作区恰好填满 820 高的视口。 */
+  min-height: calc(100vh - 76px);
 }
 .hardware-map { grid-area: map; }
-/* 遥控面板固定在侧栏后，三维场景占用原来的右列，与地图和相机窗口并排。 */
-.hardware-workspace > .scene-panel { grid-area: teleop; }
 .hardware-image { grid-area: image; }
 .hardware-asr { grid-area: asr; }
-.hardware-demo { grid-area: demo; }
-.hardware-workspace > .teleop-panel { grid-area: teleop; }
-/* 语音转写记录：纵向滚动，时间列弱化 */
-.asr-log { max-height: 190px; overflow-y: auto; padding: 8px 4px 8px 0; }
-.asr-log p { margin: 0 0 8px; line-height: 1.5; color: #2c3f4d; }
-.asr-log p:last-child { margin-bottom: 0; }
+.hardware-workspace .panel-heading { min-height: 0; padding: 10px 16px 9px; }
+/* 地图与相机画面填满所在行；数据未接入时占位块同高。 */
+.hardware-map, .hardware-image, .hardware-asr { display: flex; flex-direction: column; }
+.hardware-map :deep(.map-panel) { display: flex; flex-direction: column; flex: 1; }
+.hardware-map :deep(.map-canvas) { flex: 1; height: auto; min-height: clamp(200px, 26vh, 420px); }
+.hardware-image .camera-frame { flex: 1; height: auto; max-height: none; min-height: clamp(200px, 26vh, 420px); }
+.hardware-workspace .monitor-placeholder { flex: 1; min-height: clamp(140px, 22vh, 320px); }
+/* 语音转写：填满通高栏；时间列弱化，最新一句加大加粗便于现场跟读。 */
+.asr-log { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px 10px 4px; }
+.asr-log p { margin: 0 0 10px; line-height: 1.55; color: #2c3f4d; font-size: 13px; }
+.asr-log p.latest { color: #16303f; font-size: 16px; font-weight: 600; }
 .asr-log time { color: #93a7b4; font-size: 11px; margin-right: 10px; font-variant-numeric: tabular-nums; }
 .asr-empty { color: #93a7b4; }
 @media (max-width: 800px) {
-  .hardware-workspace { grid-template-areas: 'map' 'teleop' 'image' 'asr' 'demo'; }
+  .hardware-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; grid-template-areas: 'map' 'image' 'asr' 'demo'; }
 }
-.hardware-banner { border-color: #ecd3ab; background: #fff8eb; }
-.hardware-sidebar .brand { padding-bottom: 12px; }
-.sidebar-teleop { flex-shrink: 0; margin: 16px -6px 0; border-radius: 8px; }
+.hardware-sidebar .brand { padding: 0 4px 8px; font-size: 16px; letter-spacing: .4px; }
+.sidebar-teleop { flex-shrink: 0; margin: 10px -6px 0; border-radius: 8px; }
 .sidebar-teleop.lease-held { outline: 2px solid rgba(232, 137, 107, .7); outline-offset: 2px; }
-.pose-value { display: block; font-size: 15px; line-height: 1.6; }
-.pose-value span { display: block; }
-@media (min-width: 1201px) {
-  /* 真机指标行现有六张卡片：连接、运动服务、电量、温湿度、视觉识别和位姿。 */
-  .hardware-metrics { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.sidebar-demo { flex-shrink: 0; margin: 8px -6px 0; background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .1); border-top: 3px solid rgba(105, 180, 176, .55); border-radius: 8px; }
+/* 顶栏左组：面包屑（仅模拟模式渲染顶栏） */
+.topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+/* 侧栏抽屉把手：悬浮在屏幕左上角的空白沟槽内；呼出后右移停靠在侧栏右缘，水平三条杠 */
+.sidebar-toggle {
+  position: fixed;
+  top: 10px;
+  left: 8px;
+  z-index: 5;
+  width: 26px;
+  height: 30px;
+  padding: 0;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #c9d6de;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(32, 49, 63, .12);
+  cursor: pointer;
+  transition: left .25s ease;
 }
-.vision-foot { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-/* 主区顶部横条显示链路状态，并提供手动触发的 SSH 操作，为侧栏留出遥控空间。 */
-.field-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 14px; padding: 10px 16px; border: 1px solid #e3ebf0; border-radius: 8px; background: #fff; }
+.sidebar-toggle.open { left: 246px; }
+.sidebar-toggle i { display: block; width: 13px; height: 2px; background: #4e6675; margin: 2px 0; border-radius: 1px; }
+.sidebar-toggle:hover:not(:disabled) { border-color: #8ec4c2; }
+.sidebar-toggle.open { background: #16888b; border-color: #16888b; }
+.sidebar-toggle.open i { background: #fff; }
+.sidebar-toggle:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 1200px) {
+  /* 窄屏仍用常驻侧栏的响应式规则，抽屉把手无意义 */
+  .sidebar-toggle { display: none; }
+}
 /* 数据阀门开关：电源式圆钮，放在各数据面板标题栏右侧 */
 .data-valve { flex-shrink: 0; border: 1px solid #b7c6cf; background: #fff; color: #6a7f8d; border-radius: 999px; padding: 5px 14px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .data-valve.on { border-color: #35a0a4; color: #0f6f72; background: #e8f6f6; }
 .data-valve:disabled { opacity: .5; cursor: not-allowed; }
-.field-strip-title { color: #4e6675; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
-.field-lights { display: flex; flex-wrap: wrap; gap: 6px 16px; }
-.field-light { display: flex; align-items: center; gap: 6px; color: #8a9dab; font-size: 11px; white-space: nowrap; }
-.field-light i { width: 8px; height: 8px; border-radius: 50%; background: #c3d0d9; }
-.field-light.on { color: #496875; }
+/* 指示灯与手动恢复按钮：随链路卡移入侧栏后的深色排布 */
+.field-lights { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.field-light { display: flex; align-items: center; gap: 6px; color: #7d92a3; font-size: 11px; white-space: nowrap; min-width: 0; }
+.field-light i { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: rgba(255, 255, 255, .18); }
+.field-light.on { color: #cfe0ea; }
 .field-light.on i { background: #35a18c; box-shadow: 0 0 5px rgba(53, 161, 140, .5); }
-.field-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
-.field-button { padding: 7px 12px; border: 1px solid #c9dedf; border-radius: 6px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
-.field-button:hover:not(:disabled) { border-color: #16888b; }
+.field-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.field-button { padding: 6px 9px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 6px; background: rgba(255, 255, 255, .05); color: #9fd8d4; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.field-button:hover:not(:disabled) { border-color: rgba(53, 161, 140, .6); }
 .field-button:disabled { opacity: .5; cursor: not-allowed; }
-.field-message { flex-basis: 100%; color: #718694; font-size: 10px; overflow-wrap: anywhere; }
+.field-message { display: block; color: #9fd8d4; font-size: 10px; overflow-wrap: anywhere; margin-top: 6px; }
 .heading-actions { display: inline-flex; align-items: center; gap: 8px; }
-.scene-reset { padding: 5px 10px; border: 1px solid #c9dedf; border-radius: 5px; background: #f4fafa; color: #277e80; cursor: pointer; font-size: 11px; white-space: nowrap; }
-.scene-reset:hover:not(:disabled) { border-color: #16888b; }
-.scene-reset:disabled { opacity: .5; cursor: not-allowed; }
 /* 预览帧按原始比例缩放显示，深色底与检测框画面协调。 */
 .camera-frame { display: block; width: 100%; max-height: 46vh; object-fit: contain; border-radius: 6px; background: #0d141a; }
 .monitor-placeholder {

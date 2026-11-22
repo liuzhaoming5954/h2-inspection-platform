@@ -25,7 +25,7 @@
 - 本地联调默认使用 `.venv/bin/python scripts/dev.py start`，并使用本机模拟网关和开发数据库。页面在 `127.0.0.1:5173`，API 在 `127.0.0.1:8000`，运行日志在 `.runtime/logs/`。
 - `dev.py start` 带 `--h2-interface` 会启动本机 SDK2 网关，带 `--external-gateway` 和 `--external-teleop-gateway` 会使用已建立的转发。一键现场编排由 `h2_field_start.sh` 管理。现场启停脚本与链路恢复按钮会操作现场连接，本地演示与回归测试使用模拟器或测试替身。
 - Python 回归命令为 `.venv/bin/python -m pytest -q backend/tests robot-gateway/tests tests`。按改动选择对应测试目录，跨服务改动加跑根目录的 `tests/`。默认使用临时 SQLite，`H2_TEST_DATABASE_URL` 只指向专用测试库，测试会清理验证表。可选的 `H2_TEST_SDK_DDS=1` 测试需要已安装 SDK，使用独立的本机回环 DDS 域。
-- 前端改动运行 `pnpm --dir frontend build`，其中包含 TypeScript 类型检查。涉及界面布局时，在浏览器中检查对应模式。真机桌面布局以 1440×820 验证顶部链路管理、左侧控制权按钮、四个方向键和停步按钮首屏可见。
+- 前端改动运行 `pnpm --dir frontend build`，其中包含 TypeScript 类型检查。涉及界面布局时，在浏览器中检查对应模式。真机桌面布局以 1440×820 验证状态带和地图、图像、语音转写三个工作面板一屏完整显示（主区无页头）；链路管理指示灯与恢复按钮、遥控与巡检演示的控制和进度都在抽屉侧栏中（宽 240px，默认收起，把手悬浮在屏幕左上角，呼出时主区让位，栏内内容可滚动），遥控会话或巡检演示执行期间收起按钮禁用，演示开始时侧栏自动呼出。
 - 验证结果注明实际环境和范围，如模拟巡检、SDK 替身、回环 DDS 或现场真机。实际停稳时间和距离由现场验收记录。
 
 ## 接口与现场行为
