@@ -158,6 +158,7 @@ def parse_vision_tail(text: str) -> dict | None:
     其余行（程序启停标记、参数回显等）全部忽略。
     """
     latest: dict | None = None
+    qr_continues = False   # 上一行是帧汇总行且检出二维码（续行归属它）
     for line in text.splitlines():
         frame = FRAME_LINE.match(line)
         if frame:
@@ -174,12 +175,27 @@ def parse_vision_tail(text: str) -> dict | None:
                 "center_mm": int(center) if center is not None else 0,
                 "leds": [],
             }
+            qr_continues = latest["qr"] is not None
             continue
         detail = LED_LINE.match(line)
         if detail and latest is not None:
             color, distance, x, y = detail.groups()
             latest["leds"].append({"color": color.lower(), "distance_mm": int(distance),
                                    "x": int(x), "y": int(y)})
+            qr_continues = False
+            continue
+        # 多行二维码：视觉程序把含换行的原文分行写入日志，帧汇总行的
+        # 正则只捕获第一行；后续非帧、非缩进行是原文的续行，追加回 qr。
+        # 缩进行（"  PERSON ..."/"  QR ..."/"  LED ..."）是检测元数据，不是内容
+        if qr_continues and latest is not None:
+            if line.startswith((" ", "\t")):
+                qr_continues = False   # 缩进行 = 检测明细，二维码原文已结束
+            else:
+                stripped = line.strip()
+                if stripped:
+                    latest["qr"] = (latest["qr"] or "") + "\n" + stripped
+                else:
+                    qr_continues = False   # 空行视为原文结束
     return latest
 
 
