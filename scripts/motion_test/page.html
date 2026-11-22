@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>H2 机器人功能测试台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --line: #30363d; --text: #e6edf3;
+    --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
+    --danger: #f85149; --mono: "SF Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--card);
+           border-bottom: 1px solid var(--line); padding: 8px 16px;
+           display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  .badge { padding: 2px 10px; border-radius: 10px; font-size: 12px;
+           background: #21262d; border: 1px solid var(--line); color: var(--dim); }
+  .badge b { color: var(--text); font-family: var(--mono); }
+  .badge.ok b { color: var(--ok); } .badge.warn b { color: var(--warn); }
+  .badge.danger b { color: var(--danger); }
+  #panic { margin-left: auto; background: #da3633; color: #fff; border: none;
+           font-size: 15px; font-weight: 700; padding: 8px 22px; border-radius: 6px;
+           cursor: pointer; }
+  #panic:hover { background: #f85149; }
+  #banner { display: none; background: #3d2a00; color: #e3b341; padding: 6px 16px;
+            font-size: 13px; border-bottom: 1px solid var(--line); }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; background: var(--bg);
+        border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  nav button { background: transparent; color: var(--dim); border: none; padding: 8px 14px;
+               font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { padding: 14px 16px 40px; max-width: 1440px; }
+  section.tab { display: none; }
+  section.tab.active { display: block; }
+  .grid { display: grid; gap: 12px; }
+  .g2 { grid-template-columns: 1fr 1fr; }
+  .g3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 1000px) { .g2, .g3 { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+          padding: 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 14px; color: var(--accent); }
+  .card h3 small { color: var(--dim); font-weight: 400; }
+  .kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 4px 14px; font-family: var(--mono); font-size: 13px; }
+  .kv .k { color: var(--dim); font-family: inherit; }
+  .kv .v { text-align: right; }
+  button.act { background: #21262d; color: var(--text); border: 1px solid var(--line);
+               border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button.act:hover { border-color: var(--accent); color: var(--accent); }
+  button.act.danger { border-color: #da3633; color: #f85149; }
+  button.act.armed { background: #da3633; color: #fff; }
+  button.act:disabled { opacity: .45; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  input[type=number], input[type=text], select, textarea {
+    background: #0d1117; border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 5px 8px; font-family: var(--mono); font-size: 13px; }
+  input[type=number] { width: 84px; }
+  input[type=color] { width: 44px; height: 30px; padding: 0; border: 1px solid var(--line);
+                      border-radius: 6px; background: none; }
+  label.ck { color: var(--dim); display: inline-flex; gap: 4px; align-items: center;
+             font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 3px 8px; text-align: right;
+           font-family: var(--mono); white-space: nowrap; }
+  th { color: var(--dim); position: sticky; top: 0; background: var(--card);
+       cursor: pointer; }
+  th.l, td.l { text-align: left; }
+  td.bad { color: var(--danger); font-weight: 700; }
+  .scroll { max-height: 420px; overflow: auto; border: 1px solid var(--line);
+            border-radius: 6px; }
+  canvas { background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
+           width: 100%; display: block; }
+  .note { color: var(--dim); font-size: 12.5px; margin-top: 6px; }
+  .note code, pre { font-family: var(--mono); }
+  pre { background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
+        padding: 8px; overflow: auto; font-size: 12px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--danger); }
+  .verdict { font-size: 15px; font-weight: 700; margin: 8px 0; }
+  #rpclog .src { color: var(--dim); }
+  .keys { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+  .keys span { text-align: center; font-size: 11px; padding: 3px 0; border-radius: 4px;
+               background: #21262d; border: 1px solid var(--line); color: var(--dim); }
+  .keys span.on { background: #1f4d2a; color: #7ee787; border-color: #2ea043; }
+  .tag { font-size: 11px; padding: 1px 8px; border-radius: 8px; margin-left: 6px; }
+  .tag.done { background: #0f2e1a; color: #3fb950; }
+  .tag.skip { background: #3d2a00; color: #d29922; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 H2 机器人功能测试台</h1>
+  <span class="badge" id="b-fsm">FSM <b>—</b></span>
+  <span class="badge" id="b-api">API <b>—</b></span>
+  <span class="badge" id="b-guard">看护 <b>—</b></span>
+  <span class="badge" id="b-boot">boot <b>—</b></span>
+  <button id="panic">⏹ 急停</button>
+</header>
+<div id="banner"></div>
+<nav id="nav"></nav>
+<main>
+
+<!-- ================= 高层运动 ================= -->
+<section class="tab" id="tab-motion">
+  <div class="grid g2">
+    <div class="card">
+      <h3>查询接口 <small>· 01_RPC例程 --get_* / 02_高层运动服务接口</small></h3>
+      <div class="row">
+        <button class="act" data-rpc="GetFsmId">GetFsmId</button>
+        <button class="act" data-rpc="GetFsmMode">GetFsmMode</button>
+        <button class="act" data-rpc="GetAvailableFsmIds">GetAvailableFsmIds</button>
+        <button class="act" data-rpc="GetArmSdkStatus">GetArmSdkStatus</button>
+        <button class="act" data-rpc="GetBalanceMode">GetBalanceMode</button>
+        <button class="act" data-rpc="GetStandHeight">GetStandHeight</button>
+        <button class="act" data-rpc="GetSwingHeight">GetSwingHeight</button>
+      </div>
+      <div class="note">GetAvailableFsmIds 结果（固件支持的模式）：见下方输出。</div>
+      <div id="fsm-list" class="note"></div>
+    </div>
+    <div class="card">
+      <h3>运动接口 <small>· Move / SetVelocity / StopMove</small></h3>
+      <div class="row">
+        vx <input type="number" id="mv-vx" value="0.5" step="0.05">
+        vy <input type="number" id="mv-vy" value="0" step="0.05">
+        vyaw <input type="number" id="mvy" value="0" step="0.05">
+        ω限速见下
+      </div>
+      <div class="row">
+        <button class="act" data-move="0.5 0 0">Move 例程值 (0.5,0,0) 一次性</button>
+        <button class="act" data-move="0.2 0 0">Move 慢速 (0.2,0,0) 一次性</button>
+      </div>
+      <div class="row">
+        <label class="ck"><input type="checkbox" id="mv-cont" checked> continous_move（持续生效）</label>
+        自动停车 <input type="number" id="mv-stop" value="5" min="1" max="60"> s
+        <button class="act" id="btn-move">Move</button>
+      </div>
+      <div class="row">
+        duration <input type="number" id="sv-dur" value="1" min="0.1" max="30" step="0.5"> s
+        <button class="act" data-sv="0.5 0 0 1">SetVelocity 例程值 0.5 0 0 1</button>
+        <button class="act" id="btn-sv">SetVelocity</button>
+      </div>
+      <div class="row">
+        <button class="act" style="background:#1f2a38" data-rpc="StopMove">⏹ StopMove</button>
+        <label class="ck"><input type="checkbox" id="guard-ck" checked>
+          安全看护（到期自动 StopMove，仅测试台行为）</label>
+      </div>
+      <div class="note">文档语义：continous_move=true 长期生效；false 仅 1 秒。
+        看护关闭后完全复现文档原生行为，请确认现场安全再关。</div>
+    </div>
+    <div class="card">
+      <h3>模式切换 <small>· 02_高层运动服务接口 模式ID表</small></h3>
+      <div class="row">
+        <button class="act" data-rpc="Start">Start→601 主运控</button>
+        <button class="act" data-rpc="StandUp">StandUp→4 锁定站立</button>
+        <button class="act" data-rpc="Squat">Squat→2 蹲下</button>
+        <button class="act" data-rpc="Sit">Sit→3 落座</button>
+      </div>
+      <div class="row">
+        <button class="act" data-rpc="BalanceStand">BalanceStand</button>
+        <button class="act" data-flag='{"method":"ContinuousGait","flag":true}'>ContinuousGait 开</button>
+        <button class="act" data-flag='{"method":"ContinuousGait","flag":false}'>关</button>
+        <button class="act" data-flag='{"method":"SwitchMoveMode","flag":true}'>SwitchMoveMode 开</button>
+        <button class="act" data-flag='{"method":"SwitchMoveMode","flag":false}'>关</button>
+      </div>
+      <div class="row">
+        SetFsmId <input type="number" id="fsm-id" value="601" style="width:70px">
+        <button class="act" id="btn-fsmid">SetFsmId</button>
+        <span class="note">601/701/703/802/803 需对应 ai sport 版本（见文档表）</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>危险动作 <small>· 无平衡控制，机器人会倒，请先确认有人扶护</small></h3>
+      <div class="row">
+        <button class="act danger" data-confirm data-rpc="Damp">Damp 阻尼（瘫倒）</button>
+        <button class="act danger" data-confirm data-rpc="ZeroTorque">ZeroTorque 零力矩（会倒）</button>
+      </div>
+      <div class="note">首次点击变红后 3 秒内再点一次才会真正下发。</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>调用日志 <small>· 回执码 0 = 文档定义的成功</small></h3>
+    <div class="scroll"><table id="rpclog">
+      <thead><tr><th class="l">时间</th><th class="l">来源</th><th class="l">方法</th>
+        <th class="l">参数</th><th>回执码</th><th>耗时ms</th><th class="l">数据/错误</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ================= 里程计 ================= -->
+<section class="tab" id="tab-odom">
+  <div class="grid g2">
+    <div class="card">
+      <h3>rt/odommodestate（500Hz 高频）<small>· 03_里程计服务接口</small></h3>
+      <div class="kv" id="odom-hf"></div>
+    </div>
+    <div class="card">
+      <h3>rt/lf/odommodestate（20Hz 低频）<small>· 文档称两路可同时接收</small></h3>
+      <div class="kv" id="odom-lf"></div>
+      <div class="note">低频话题在本机固件上是否存在即是一项实测结论（早期固件无）。</div>
+    </div>
+  </div>
+  <div class="grid g3" style="margin-top:12px">
+    <div class="card"><h3>轨迹（世界系 XY，自清零点）</h3><canvas id="c-traj" data-h="300"></canvas>
+      <div class="row"><button class="act" id="traj-reset">📍 清零轨迹原点</button></div></div>
+    <div class="card"><h3>机体系速度模长 |v| m/s</h3><canvas id="c-speed" data-h="300"></canvas></div>
+    <div class="card"><h3>yaw rad</h3><canvas id="c-yaw" data-h="300"></canvas></div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>行走跟踪测试 <small>· 验证 position 是否积分实际行走</small></h3>
+    <div class="row">
+      <button class="act" id="rec-start">⏺ 开始录制</button>
+      <button class="act" id="rec-stop" disabled>⏹ 停止并分析</button>
+      <a class="act" id="rec-dl" download="odom_record.csv" disabled>下载 CSV</a>
+      <span id="rec-status" class="note"></span>
+    </div>
+    <div id="rec-summary"></div>
+    <div class="note">流程：开始录制 → 遥控/页面让机器人走一段（≥2m）→ 停止并分析。
+      判定口径：position 首尾均值位移 vs 机体系速度旋转世界系后的梯形积分路程。</div>
+  </div>
+  <div class="note" style="margin-top:8px">文档要求 State Estimator ≥ 2.1.0.12；
+    世界系以开机位置为原点（x 前 y 左）；速度为机体系量测；调试模式（底层）下不可用。</div>
+</section>
+
+<!-- ================= 底层状态 ================= -->
+<section class="tab" id="tab-low">
+  <div class="grid g2">
+    <div class="card">
+      <h3>IMUState_ <small>· rt/lowstate（02_底层服务接口）</small></h3>
+      <div class="kv" id="imu-kv"></div>
+      <div class="row" style="margin-top:8px">
+        <canvas id="c-bubble" data-h="170" style="max-width:220px"></canvas>
+        <div style="flex:1"><canvas id="c-gyro" data-h="170"></canvas></div>
+      </div>
+      <div class="row">
+        <button class="act" id="imu-test">🧪 静态测试 10s（陀螺零偏/加计模长/漂移）</button>
+        <span id="imu-test-status" class="note"></span>
+      </div>
+      <div id="imu-report"></div>
+    </div>
+    <div class="card">
+      <h3>遥控器 <small>· wireless_remote 40B → xRockerBtnDataStruct（03_遥控器数据结构）</small></h3>
+      <div class="row">
+        <canvas id="c-stick-l" data-h="170" style="max-width:200px"></canvas>
+        <canvas id="c-stick-r" data-h="170" style="max-width:200px"></canvas>
+      </div>
+      <div class="kv" id="remote-kv" style="margin-top:6px"></div>
+      <div class="keys" id="remote-keys" style="margin-top:8px"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>MotorState_[35] <small>· 关节命名与限位见 01_关节电机顺序（超限标红）</small></h3>
+    <div class="scroll"><table id="motors">
+      <thead><tr><th>#</th><th class="l">关节</th><th>q rad</th><th>限位</th><th>dq</th>
+        <th>ddq</th><th>τ_est</th><th>温1</th><th>温2</th><th>V</th><th>mode</th><th>state</th></tr></thead>
+      <tbody></tbody></table></div>
+    <div class="note">rt/lowcmd 发布与 rt/arm_sdk 上肢 DDS 控制需进入调试模式/运控模式配合，
+      属主动控制，未纳入本测试台（见覆盖清单）。</div>
+  </div>
+</section>
+
+<!-- ================= 音频灯光 ================= -->
+<section class="tab" id="tab-audio">
+  <div class="card" id="audio-avail"></div>
+  <div class="grid g3" style="margin-top:12px">
+    <div class="card">
+      <h3>音量 <small>· GetVolume / SetVolume(0-100)</small></h3>
+      <div class="row"><button class="act" data-audio="GetVolume">读取</button>
+        <input type="number" id="vol" min="0" max="100" value="70" style="width:80px">
+        <button class="act" id="vol-set">设置</button><span id="vol-now" class="note"></span></div>
+    </div>
+    <div class="card">
+      <h3>TTS <small>· TtsMaker(text, speaker_id 0=中文 1=英文)</small></h3>
+      <div class="row"><textarea id="tts-text" rows="2" style="flex:1">你好。我是宇树科技的机器人。例程启动成功</textarea></div>
+      <div class="row"><select id="tts-sp"><option value="0">0 中文</option><option value="1">1 英文</option></select>
+        <button class="act" id="tts-go">▶ 播报</button>
+        <button class="act" data-audio='{"method":"PlayStop"}'>PlayStop</button></div>
+    </div>
+    <div class="card">
+      <h3>LED 灯带 <small>· LedControl(r,g,b)</small></h3>
+      <div class="row">
+        <input type="color" id="led-c" value="#00ff00">
+        <button class="act" id="led-go">应用</button>
+        <button class="act" data-audio='{"method":"LedControl","args":{"r":0,"g":0,"b":0}}'>熄灭</button>
+        <button class="act" data-audio='{"method":"LedControl","args":{"r":0,"g":0,"b":255}}'>蓝</button>
+      </div>
+    </div>
+  </div>
+  <div class="grid g2" style="margin-top:12px">
+    <div class="card">
+      <h3>内置 ASR / 播放状态 <small>· 订阅 rt/audio_msg（需 APP/遥控器切到唤醒模式）</small></h3>
+      <div class="kv" id="amsg-kv"></div>
+      <div id="amsg-text" class="note" style="font-size:13px"></div>
+    </div>
+    <div class="card">
+      <h3>麦克风组播 <small>· 239.168.123.161:5555（16k/16bit/单通道，降噪后）</small></h3>
+      <div class="row">
+        <button class="act" data-mic="listen">开始监听</button>
+        <button class="act" data-mic="off">停止</button>
+        <button class="act" id="mic-rec">⏺ 录 5s</button>
+        <a class="act" id="mic-dl" download="mic_record.wav" style="display:none">下载 WAV</a>
+      </div>
+      <div class="kv" id="mic-kv" style="margin-top:6px"></div>
+      <div class="note">有码率 ≈ 32000 B/s 说明组播流正常。需麦克风处于打开（唤醒）状态。</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>音频调用日志</h3>
+    <div class="scroll"><table id="audiolog">
+      <thead><tr><th class="l">时间</th><th class="l">方法</th><th class="l">参数</th>
+        <th>回执码</th><th>耗时ms</th><th class="l">错误</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</section>
+
+<!-- ================= 拍照 ================= -->
+<section class="tab" id="tab-video">
+  <div class="card" id="video-avail"></div>
+  <div class="card" style="margin-top:12px">
+    <h3>JPEG 拍照 <small>· VideoClient.GetImageSample()（720P）</small></h3>
+    <div class="row"><button class="act" id="snap">📷 拍照</button>
+      <a class="act" id="snap-dl" download="snapshot.jpg" style="display:none">下载</a>
+      <span class="note">SetTimeout(1.f) 后 Init，照搬文档例程参数。</span></div>
+    <img id="snap-img" style="max-width:100%;border-radius:8px;margin-top:8px;display:none"
+         alt="快照">
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>h264 图传（未纳入，文档原命令）</h3>
+    <pre>gst-launch-1.0 udpsrc address=230.1.1.1 port=1720 multicast-iface=&lt;interface&gt; \
+  ! queue ! application/x-rtp, media=video, encoding-name=H264 \
+  ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink</pre>
+    <div class="note">需接收端安装 gstreamer 插件；帧率 15Hz，分辨率 1280×720。</div>
+  </div>
+</section>
+
+<!-- ================= 覆盖清单 ================= -->
+<section class="tab" id="tab-cover">
+  <div class="card">
+    <h3>文档 → 测试项覆盖表 <small>· 未纳入项均注明原因</small></h3>
+    <table id="cover-table">
+      <thead><tr><th class="l">文档</th><th class="l">测试项</th><th class="l">状态</th></tr></thead>
+      <tbody>
+        <tr><td class="l">04/02/01 RPC例程</td><td class="l">LocoClient 全部命令参数（--get/--set/--move 等）</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">04/02/02 高层运动服务接口</td><td class="l">普通+专家接口全部 RPC；模式ID表</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">04/02/02 高层运动服务接口</td><td class="l">rt/arm_sdk 上肢 DDS 控制（LowCmd）</td><td class="l"><span class="tag skip">未纳入：主动控制上肢，需运控模式配合，风险高</span></td></tr>
+        <tr><td class="l">04/02/03 里程计服务接口</td><td class="l">500Hz/20Hz 双话题、五组字段、行走跟踪</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">04/01/02 底层服务接口</td><td class="l">rt/lowstate 订阅（IMU/35电机/遥控器）</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">04/01/02 底层服务接口</td><td class="l">rt/lowcmd 发布</td><td class="l"><span class="tag skip">未纳入：需调试模式，内置运控退出，高层服务全失效</span></td></tr>
+        <tr><td class="l">04/01/01 关节电机顺序</td><td class="l">35 槽位命名与限位核对</td><td class="l"><span class="tag done">随电机表实测</span></td></tr>
+        <tr><td class="l">04/01/03 遥控器数据结构</td><td class="l">40 字节解码（摇杆/按键/L2）</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">05/02 音频灯光服务接口</td><td class="l">音量/TTS/PlayStop/LED/rt/audio_msg/组播麦克风</td><td class="l"><span class="tag done">页面实测（需 vui_service ≥ 2.3.0.1）</span></td></tr>
+        <tr><td class="l">05/04 多媒体服务接口</td><td class="l">JPEG 拍照 GetImageSample</td><td class="l"><span class="tag done">页面实测</span></td></tr>
+        <tr><td class="l">05/04 多媒体服务接口</td><td class="l">h264 图传（UDP 组播）</td><td class="l"><span class="tag skip">未纳入：需 gstreamer 接收端，命令见拍照页</span></td></tr>
+        <tr><td class="l">05/03 双目数据流获取接口</td><td class="l">双目推流</td><td class="l"><span class="tag skip">未纳入：需手机端关 video_hub 并手动开推流服务</span></td></tr>
+        <tr><td class="l">05/05 H2Plus GMSL 相机接口</td><td class="l">GMSL 取图</td><td class="l"><span class="tag skip">不适用：H2Plus 专属（本机为网络双目）</span></td></tr>
+        <tr><td class="l">06/01 ROS2 通信例程</td><td class="l">ROS2 桥接</td><td class="l"><span class="tag skip">未纳入：PC3 未部署 ROS2 环境</span></td></tr>
+        <tr><td class="l">06/02 DDS 通信例程</td><td class="l">ChannelFactory/订阅发布</td><td class="l"><span class="tag done">本测试台即按该文档 API 实现</span></td></tr>
+        <tr><td class="l">07 调试说明</td><td class="l">进入调试模式</td><td class="l"><span class="tag skip">未纳入：调试模式下高层服务失效，与全部页面测试互斥</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>实测结论记录 <small>· 存浏览器 localStorage，可导出 Markdown</small></h3>
+    <div class="row">
+      <select id="note-cat">
+        <option>高层运动</option><option>里程计</option><option>底层状态</option>
+        <option>遥控器</option><option>音频灯光</option><option>拍照</option><option>其他</option>
+      </select>
+      <input type="text" id="note-text" placeholder="例：Move(continuous) 在本机返回码 0 但机器人未动" style="flex:1">
+      <button class="act" id="note-add">记录</button>
+      <button class="act" id="note-export">导出 .md</button>
+      <button class="act danger" id="note-clear">清空</button>
+    </div>
+    <div class="scroll" style="max-height:300px"><table id="notes-table">
+      <thead><tr><th class="l">时间</th><th class="l">分类</th><th class="l">结论</th></tr></thead>
+      <tbody></tbody></table></div>
+  </div>
+</section>
+
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let S = null;                 // 最近一次 /api/state
+let tab = "motion";
+
+// ---------- 标签页 ----------
+const TABS = [["motion", "高层运动"], ["odom", "里程计"], ["low", "底层状态"],
+              ["audio", "音频灯光"], ["video", "拍照"], ["cover", "覆盖清单"]];
+$("nav").innerHTML = TABS.map(([id, name]) =>
+  `<button data-tab="${id}">${name}</button>`).join("");
+$("nav").onclick = (e) => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  tab = btn.dataset.tab;
+  document.querySelectorAll("nav button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll("section.tab").forEach(s =>
+    s.classList.toggle("active", s.id === "tab-" + tab));
+};
+document.querySelector("nav button").classList.add("active");
+document.querySelector("section.tab").classList.add("active");
+
+// ---------- 工具 ----------
+async function postJSON(url, payload) {
+  try {
+    const reply = await fetch(url, {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload || {})});
+    return await reply.json();
+  } catch (err) { return {error: String(err)}; }
+}
+const fmt = (v, d = 3) => (v === null || v === undefined) ? "—"
+  : (typeof v === "number" ? v.toFixed(d) : String(v));
+
+function kv(elem, pairs) {
+  elem.innerHTML = pairs.map(([k, v, cls]) =>
+    `<span class="k">${k}</span><span class="v ${cls || ""}">${v}</span>`).join("");
+}
+
+// 两段式危险确认：首次点击变红并拦下，3 秒内再点才放行到按钮自身的处理器
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-confirm]");
+  if (!btn) return;
+  if (!btn.classList.contains("armed")) {
+    e.stopImmediatePropagation();
+    btn.classList.add("armed");
+    btn.dataset.label = btn.textContent;
+    btn.textContent = "再次点击确认！";
+    btn.dataset.armedNow = "";
+    btn.dataset.token = String(setTimeout(() => {
+      btn.classList.remove("armed");
+      btn.textContent = btn.dataset.label;
+      delete btn.dataset.armedNow;
+    }, 3000));
+  } else {
+    clearTimeout(+btn.dataset.token);
+    btn.classList.remove("armed");
+    btn.textContent = btn.dataset.label;
+    // 不删 armedNow：放行本次点击，处理器执行后自行清理
+  }
+}, true);
+
+// ---------- RPC 按钮 ----------
+document.querySelectorAll("button[data-rpc]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    if (btn.hasAttribute("data-confirm") && btn.dataset.armedNow === undefined) return;
+    delete btn.dataset.armedNow;
+    const reply = await postJSON("/api/rpc", {method: btn.dataset.rpc, args: {}});
+    if (btn.dataset.rpc === "GetAvailableFsmIds" && reply.data) {
+      $("fsm-list").innerHTML = "<b>可用 FSM：</b> " +
+        reply.data.map(([id, name]) => `${id}:${name}`).join("，");
+    }
+  });
+});
+document.querySelectorAll("button[data-move]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const [vx, vy, vyaw] = btn.dataset.move.split(" ").map(Number);
+    const reply = await postJSON("/api/rpc", {method: "Move",
+      args: {vx, vy, vyaw, continous: false}});
+    console.log(reply);
+  });
+});
+document.querySelectorAll("button[data-sv]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const [vx, vy, omega, duration] = btn.dataset.sv.split(" ").map(Number);
+    postJSON("/api/rpc", {method: "SetVelocity", args: {vx, vy, omega, duration}});
+  });
+});
+document.querySelectorAll("button[data-flag]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const spec = JSON.parse(btn.dataset.flag);
+    postJSON("/api/rpc", {method: spec.method, args: {flag: spec.flag}});
+  });
+});
+$("btn-move").onclick = () => postJSON("/api/rpc", {method: "Move", args: {
+  vx: +$("mv-vx").value || 0, vy: +$("mv-vy").value || 0, vyaw: +$("mvy").value || 0,
+  continous: $("mv-cont").checked, auto_stop_s: +$("mv-stop").value || 5}});
+$("btn-sv").onclick = () => postJSON("/api/rpc", {method: "SetVelocity", args: {
+  vx: +$("mv-vx").value || 0, vy: +$("mv-vy").value || 0,
+  omega: +$("mvy").value || 0, duration: +$("sv-dur").value || 1}});
+$("btn-fsmid").onclick = () => postJSON("/api/rpc", {method: "SetFsmId",
+  args: {id: +$("fsm-id").value | 0}});
+$("guard-ck").onchange = () => postJSON("/api/guard", {enabled: $("guard-ck").checked});
+$("panic").onclick = async () => {
+  $("panic").textContent = "急停中…";
+  await postJSON("/api/panic", {});
+  $("panic").textContent = "⏹ 急停";
+};
+
+// ---------- 里程计录制 ----------
+$("rec-start").onclick = async () => { await postJSON("/api/record/start"); };
+$("rec-stop").onclick = async () => { await postJSON("/api/record/stop"); };
+$("traj-reset").onclick = () => postJSON("/api/trajectory/reset", {});
+
+// ---------- 音频 ----------
+document.querySelectorAll("button[data-audio]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    // data-audio 既支持纯方法名（GetVolume），也支持 JSON 规格（PlayStop/LedControl）
+    let spec;
+    try { spec = JSON.parse(btn.dataset.audio); } catch { spec = {method: btn.dataset.audio}; }
+    postJSON("/api/audio", spec);
+  });
+});
+$("vol-set").onclick = () => postJSON("/api/audio",
+  {method: "SetVolume", args: {volume: +$("vol").value | 0}});
+$("tts-go").onclick = () => postJSON("/api/audio", {method: "TtsMaker", args: {
+  text: $("tts-text").value, speaker_id: +$("tts-sp").value}});
+$("led-go").onclick = () => {
+  const hex = $("led-c").value;
+  postJSON("/api/audio", {method: "LedControl", args: {
+    r: parseInt(hex.slice(1, 3), 16), g: parseInt(hex.slice(3, 5), 16),
+    b: parseInt(hex.slice(5, 7), 16)}});
+};
+document.querySelectorAll("button[data-mic]").forEach((btn) => {
+  btn.addEventListener("click", () => postJSON("/api/mic/listen",
+    {on: btn.dataset.mic === "listen"}));
+});
+$("mic-rec").onclick = () => postJSON("/api/mic/record", {seconds: 5});
+
+// ---------- 拍照 ----------
+$("snap").onclick = () => {
+  const url = "/api/video/snapshot?ts=" + Date.now();
+  $("snap-img").src = url;
+  $("snap-img").style.display = "block";
+  $("snap-dl").href = url;
+  $("snap-dl").style.display = "inline-block";
+};
+
+// ---------- IMU 静态测试 ----------
+$("imu-test").onclick = () => postJSON("/api/imu_test/start", {});
+
+// ---------- 结论记录（localStorage） ----------
+const NOTES_KEY = "h2-motion-bench-notes";
+const loadNotes = () => JSON.parse(localStorage.getItem(NOTES_KEY) || "[]");
+const saveNotes = (notes) => localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+function renderNotes() {
+  const rows = loadNotes().map((n) =>
+    `<tr><td class="l">${n.t}</td><td class="l">${n.cat}</td><td class="l">${n.text}</td></tr>`);
+  $("notes-table").querySelector("tbody").innerHTML = rows.join("") ||
+    '<tr><td colspan="3" class="l" style="color:var(--dim)">暂无记录</td></tr>';
+}
+$("note-add").onclick = () => {
+  const text = $("note-text").value.trim();
+  if (!text) return;
+  const notes = loadNotes();
+  notes.unshift({t: new Date().toLocaleString("zh-CN", {hour12: false}),
+                 cat: $("note-cat").value, text});
+  saveNotes(notes);
+  $("note-text").value = "";
+  renderNotes();
+};
+$("note-export").onclick = () => {
+  const md = "# H2 实测结论记录\n\n" + loadNotes().map((n) =>
+    `| ${n.t} | ${n.cat} | ${n.text} |`).join("\n");
+  const blob = new Blob([md], {type: "text/markdown"});
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "h2_findings.md";
+  link.click();
+};
+$("note-clear").onclick = () => { if (confirm("清空全部结论记录？")) {
+  saveNotes([]); renderNotes(); } };
+renderNotes();
+
+// ---------- 画图 ----------
+function prep(canvas) {
+  // 布局高度固定读 data-h（不会像 height 属性那样被像素回写污染），
+  // 否则「像素高 = CSS高×dpr」写回属性后下轮再读会几何级膨胀，页面被无限撑长
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || 300;
+  const height = +(canvas.dataset.h || 300);
+  canvas.style.height = height + "px";
+  const pxWidth = Math.round(width * dpr), pxHeight = Math.round(height * dpr);
+  if (canvas.width !== pxWidth) canvas.width = pxWidth;
+  if (canvas.height !== pxHeight) canvas.height = pxHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  return [ctx, width, height];
+}
+function lineChart(canvas, seriesList, opts = {}) {
+  // seriesList: [{data:[[t, v...]], col, idx}]，idx 指取每行的第几列
+  const [ctx, width, height] = prep(canvas);
+  const pad = {l: 46, r: 8, t: 8, b: 18};
+  let lo = Infinity, hi = -Infinity, t0 = Infinity, t1 = -Infinity;
+  for (const s of seriesList) for (const row of s.data) {
+    const v = row[s.idx];
+    if (v === null || v === undefined) continue;
+    lo = Math.min(lo, v); hi = Math.max(hi, v);
+    t0 = Math.min(t0, row[0]); t1 = Math.max(t1, row[0]);
+  }
+  if (!isFinite(lo)) return;
+  if (opts.zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (hi - lo < 1e-9) { hi += 0.5; lo -= 0.5; }
+  const margin = (hi - lo) * 0.08;
+  lo -= margin; hi += margin;
+  ctx.strokeStyle = "#21262d"; ctx.fillStyle = "#8b949e"; ctx.font = "10px monospace";
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + (height - pad.t - pad.b) * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(width - pad.r, y); ctx.stroke();
+    const value = hi - (hi - lo) * i / 4;
+    ctx.fillText(value.toFixed(Math.abs(hi) < 3 ? 2 : 1), 4, y + 3);
+  }
+  if (t1 - t0 > 0.01) {
+    ctx.fillText("-60s", pad.l, height - 4);
+    ctx.fillText("现在", width - pad.r - 20, height - 4);
+  }
+  for (const s of seriesList) {
+    ctx.strokeStyle = s.col; ctx.lineWidth = 1.2; ctx.beginPath();
+    let started = false;
+    for (const row of s.data) {
+      const v = row[s.idx];
+      if (v === null || v === undefined) { started = false; continue; }
+      const x = pad.l + (width - pad.l - pad.r) *
+        (t1 === t0 ? 0.5 : (row[0] - t0) / (t1 - t0));
+      const y = pad.t + (height - pad.t - pad.b) * (1 - (v - lo) / (hi - lo));
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      started = true;
+    }
+    ctx.stroke();
+  }
+  if (opts.hline !== undefined) {
+    const y = pad.t + (height - pad.t - pad.b) * (1 - (opts.hline - lo) / (hi - lo));
+    ctx.strokeStyle = "#f8514933"; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(width - pad.r, y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+function trajChart(canvas, points) {
+  const [ctx, width, height] = prep(canvas);
+  if (!points.length) return;
+  let x0 = -1, y0 = -1, x1 = 1, y1 = 1;
+  for (const [x, y] of points) { x0 = Math.min(x0, x); x1 = Math.max(x1, x);
+                                 y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const span = Math.max(x1 - x0, y1 - y0, 0.5) * 1.15;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  x0 = cx - span / 2; x1 = cx + span / 2; y0 = cy - span / 2; y1 = cy + span / 2;
+  const map = (x, y) => [30 + (x - x0) / span * (width - 40),
+                         10 + (1 - (y - y0) / span) * (height - 30)];
+  ctx.strokeStyle = "#21262d"; ctx.font = "10px monospace"; ctx.fillStyle = "#8b949e";
+  const gridN = 5;
+  for (let i = 0; i <= gridN; i++) {
+    const gx = 30 + (width - 40) * i / gridN, gy = 10 + (height - 30) * i / gridN;
+    ctx.beginPath(); ctx.moveTo(gx, 10); ctx.lineTo(gx, height - 20); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(30, gy); ctx.lineTo(width - 10, gy); ctx.stroke();
+    const valueM = (x0 + span * i / gridN).toFixed(1);
+    ctx.fillText(valueM, gx - 10, height - 6);
+  }
+  const [ox, oy] = map(0, 0);
+  ctx.strokeStyle = "#58a6ff66";
+  ctx.beginPath(); ctx.moveTo(ox - 6, oy); ctx.lineTo(ox + 6, oy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ox, oy - 6); ctx.lineTo(ox, oy + 6); ctx.stroke();
+  ctx.fillStyle = "#3fb950"; ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  points.forEach(([x, y], i) => {
+    const [px, py] = map(x, y);
+    i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+  });
+  ctx.stroke();
+  const [lx, ly] = map(points[points.length - 1][0], points[points.length - 1][1]);
+  ctx.beginPath(); ctx.arc(lx, ly, 3, 0, 7); ctx.fill();
+  ctx.fillText(`格距 ${(span / gridN).toFixed(2)}m`, 34, 20);
+}
+function stickChart(canvas, x, y, label) {
+  const [ctx, width, height] = prep(canvas);
+  const cx = width / 2, cy = height / 2, r = Math.min(width, height) / 2 - 12;
+  ctx.strokeStyle = "#30363d";
+  ctx.strokeRect(cx - r, cy - r, r * 2, r * 2);
+  ctx.beginPath(); ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r); ctx.stroke();
+  ctx.fillStyle = "#58a6ff";
+  ctx.beginPath(); ctx.arc(cx + (x || 0) * r, cy - (y || 0) * r, 5, 0, 7); ctx.fill();
+  ctx.fillStyle = "#8b949e"; ctx.font = "11px sans-serif";
+  ctx.fillText(label, 8, 14);
+  ctx.fillText(`(${fmt(x, 2)}, ${fmt(y, 2)})`, 8, height - 6);
+}
+function bubbleChart(canvas, roll, pitch) {
+  const [ctx, width, height] = prep(canvas);
+  const cx = width / 2, cy = height / 2, r = Math.min(width, height) / 2 - 10;
+  ctx.strokeStyle = "#30363d";
+  for (const factor of [1, 0.66, 0.33]) {
+    ctx.beginPath(); ctx.arc(cx, cy, r * factor, 0, 7); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r); ctx.stroke();
+  // 每圈 10°：roll/pitch 超过 20° 出圈
+  const px = cx + Math.max(-1, Math.min(1, (roll || 0) / 0.35)) * r;
+  const py = cy + Math.max(-1, Math.min(1, (pitch || 0) / 0.35)) * r;
+  ctx.fillStyle = "#3fb950";
+  ctx.beginPath(); ctx.arc(px, py, 6, 0, 7); ctx.fill();
+  ctx.fillStyle = "#8b949e"; ctx.font = "10px monospace";
+  ctx.fillText("每圈10°", 6, 12);
+}
+
+// ---------- 渲染 ----------
+function render() {
+  if (!S) return;
+  // 页头
+  $("b-fsm").className = "badge " + (S.fsm ? "ok" : "warn");
+  $("b-fsm").innerHTML = `FSM <b>${S.fsm ? S.fsm.id + (S.fsm_name ? " " + S.fsm_name : "")
+    : "无应答"}</b>`;
+  $("b-api").innerHTML = `API <b>${S.api_version || "—"}</b>`;
+  const guard = S.guard_left_ms;
+  $("b-guard").className = "badge " + (guard ? "danger" : "");
+  $("b-guard").innerHTML = `看护 <b>${S.guard_enabled ? (guard !== null ?
+    (guard / 1000).toFixed(1) + "s" : "待命") : "关"}</b>`;
+  $("b-boot").innerHTML = `boot <b>${S.boot_id}</b>·${Math.round(S.uptime_s / 60)}min`;
+  $("banner").style.display = S.gateway_running ? "block" : "none";
+  $("banner").textContent = "⚠ 检测到 h2_gateway 正在运行：2026-11-22 实测此时第二个客户端的" +
+    " SetVelocity 可能不被运控服务应答。测运动接口前建议先停网关。";
+  if (S.idl_errors.length) {
+    $("banner").style.display = "block";
+    $("banner").textContent += " ｜ 订阅失败：" + S.idl_errors.join("；");
+  }
+
+  // 高层运动：日志表
+  $("rpclog").querySelector("tbody").innerHTML = S.rpc_log.map((entry) => `
+    <tr><td class="l">${entry.t}</td><td class="l src">${entry.source}</td>
+    <td class="l"><b>${entry.method}</b></td><td class="l">${JSON.stringify(entry.args)}${entry.effective
+      ? ` →<br>${JSON.stringify(entry.effective)}` : ""}</td>
+    <td class="${entry.code === 0 ? "ok" : "err"}">${fmt(entry.code)}</td>
+    <td>${entry.elapsed_ms}</td>
+    <td class="l ${entry.error ? "err" : ""}">${entry.error || JSON.stringify(entry.data) || ""}</td></tr>`).join("");
+
+  // 里程计
+  const odom = (o, elem) => {
+    if (!o) { kv(elem, [["状态", "无数据", "err"]]); return; }
+    kv(elem, [
+      ["频率 Hz", o.hz, o.hz > 0 ? "ok" : "err"], ["年龄 ms", o.age_ms],
+      ["x m", fmt(o.x, 4)], ["y m", fmt(o.y, 4)], ["z m", fmt(o.z, 3)],
+      ["vx m/s", fmt(o.vx)], ["vy m/s", fmt(o.vy)], ["vz m/s", fmt(o.vz)],
+      ["roll rad", fmt(o.roll)], ["pitch rad", fmt(o.pitch)], ["yaw rad", fmt(o.yaw)],
+      ["yaw率 rad/s", fmt(o.yaw_rate, 4)],
+      ["四元数", o.quat.map((q) => q.toFixed(2)).join(",")],
+    ]);
+  };
+  odom(S.odom_hf, $("odom-hf"));
+  odom(S.odom_lf, $("odom-lf"));
+  lineChart($("c-speed"), [{data: S.series.speed, col: "#58a6ff", idx: 1}], {zero: true});
+  lineChart($("c-yaw"), [{data: S.series.yaw, col: "#d2a8ff", idx: 1}], {});
+  trajChart($("c-traj"), S.traj);
+  // 录制状态
+  $("rec-start").disabled = S.record.on;
+  $("rec-stop").disabled = !S.record.on;
+  $("rec-dl").style.pointerEvents = S.record.rows ? "auto" : "none";
+  if (S.record.rows) $("rec-dl").href = "/api/record/download";
+  $("rec-status").textContent = S.record.on
+    ? `录制中：${S.record.rows} 帧 / ${S.record.duration_s}s`
+    : `已采 ${S.record.rows} 帧 / ${S.record.duration_s}s`;
+  const sum = S.record.summary;
+  $("rec-summary").innerHTML = !sum ? "" : (sum.error
+    ? `<div class="verdict warn">${sum.error}</div>`
+    : `<div class="verdict ${sum.verdict.startsWith("✅") ? "ok" :
+        sum.verdict.startsWith("❌") ? "err" : "warn"}">${sum.verdict}</div>
+      <table><tbody>
+      <tr><td class="l">运动窗口</td><td>${sum.moving_window_s[0]}s → ${sum.moving_window_s[1]}s</td></tr>
+      <tr><td class="l">position 净位移</td><td>${sum.pos_displacement_m} m</td></tr>
+      <tr><td class="l">速度积分路程</td><td>${sum.vel_path_integral_m} m</td></tr>
+      <tr><td class="l">速度积分净位移</td><td>${sum.vel_net_integral_m} m</td></tr>
+      <tr><td class="l">position / 路程</td><td>${sum.pos_over_path}</td></tr>
+      <tr><td class="l">yaw 变化</td><td>${sum.yaw_change_rad} rad</td></tr>
+      <tr><td class="l">峰值速度</td><td>${sum.peak_speed} m/s</td></tr></tbody></table>`);
+
+  // 底层状态
+  const low = S.lowstate;
+  if (low) {
+    kv($("imu-kv"), [
+      ["频率 Hz", low.hz, low.hz > 0 ? "ok" : "err"], ["年龄 ms", low.age_ms],
+      ["roll", fmt(low.rpy[0])], ["pitch", fmt(low.rpy[1])], ["yaw", fmt(low.rpy[2])],
+      ["gyro rad/s", low.gyro.map((g) => g.toFixed(3)).join(",")],
+      ["acc m/s²", low.accel.map((a) => a.toFixed(2)).join(",")],
+      ["|acc|", fmt(Math.hypot(...low.accel), 2)],
+      ["quat", low.quat.map((q) => q.toFixed(2)).join(",")],
+      ["IMU温度℃", fmt(low.imu_temp, 0)],
+    ]);
+    bubbleChart($("c-bubble"), low.rpy[0], low.rpy[1]);
+    lineChart($("c-gyro"), [
+      {data: S.series.gyro, col: "#f85149", idx: 1},
+      {data: S.series.gyro, col: "#3fb950", idx: 2},
+      {data: S.series.gyro, col: "#58a6ff", idx: 3}], {zero: true});
+    // 电机表
+    const joints = S.joints;
+    $("motors").querySelector("tbody").innerHTML = low.motors.map((m) => {
+      const j = joints[m.i] || {};
+      const out = j.lo !== null && j.lo !== undefined && (m.q < j.lo - 0.02 || m.q > j.hi + 0.02);
+      return `<tr><td>${m.i}</td><td class="l">${m.name}</td>
+        <td>${fmt(m.q)}</td><td class="${out ? "bad" : ""}">${out ? "超限!" :
+          (j.lo !== null && j.lo !== undefined ? `[${j.lo.toFixed(1)},${j.hi.toFixed(1)}]` : "—")}</td>
+        <td>${fmt(m.dq, 2)}</td><td>${fmt(m.ddq, 1)}</td><td>${fmt(m.tau, 1)}</td>
+        <td>${m.t1}</td><td>${m.t2}</td><td>${m.vol}</td>
+        <td>${m.mode}</td><td>${m.motorstate}</td></tr>`;
+    }).join("");
+    // 遥控器
+    const remote = low.remote;
+    if (remote) {
+      stickChart($("c-stick-l"), remote.lx, remote.ly, "左摇杆 lx/ly");
+      stickChart($("c-stick-r"), remote.rx, remote.ry, "右摇杆 rx/ry");
+      kv($("remote-kv"), [["L2 模拟", fmt(remote.l2, 2)],
+        ["按键值", "0x" + remote.keys.toString(16).padStart(4, "0")],
+        ["按下", remote.pressed.join(",") || "—"]]);
+      $("remote-keys").innerHTML = ["R1", "L1", "start", "select", "R2", "L2", "F1", "F2",
+        "A", "B", "X", "Y", "up", "right", "down", "left"].map((k) =>
+        `<span class="${remote.pressed.includes(k) ? "on" : ""}">${k}</span>`).join("");
+    } else {
+      kv($("remote-kv"), [["遥控器", "无数据/解码失败", "err"]]);
+    }
+  } else {
+    kv($("imu-kv"), [["rt/lowstate", "无数据", "err"]]);
+  }
+  // IMU 静态测试
+  const imu = S.imu_test;
+  $("imu-test").disabled = imu.running;
+  $("imu-test-status").textContent = imu.running ? "采样中…" : "";
+  if (imu.report && !imu.report.error) {
+    const r = imu.report;
+    $("imu-report").innerHTML = `<table><tbody>
+      <tr><td class="l">来源</td><td>${r.source}</td><td class="l">帧数</td><td>${r.frames}</td>
+      <td class="l">时长</td><td>${r.duration_s}s</td></tr>
+      <tr><td class="l">陀螺零偏 °/s</td><td>${r.gyro_mean_dps.join(", ")}</td>
+      <td class="l">噪声 σ</td><td>${r.gyro_std_dps.join(", ")}</td></tr>
+      <tr><td class="l">z 轴漂移</td><td>${r.gyro_z_drift_deg_min} °/min</td>
+      <td class="l">|acc|</td><td>${r.accel_mean_ms2} m/s²</td>
+      <td class="l">yaw 波动</td><td>${r.yaw_span_deg}°</td></tr></tbody></table>
+      <div>${r.notes.map((n) => "· " + n).join("<br>")}</div>`;
+  } else if (imu.report && imu.report.error) {
+    $("imu-report").innerHTML = `<div class="err">${imu.report.error}</div>`;
+  }
+
+  // 音频
+  $("audio-avail").innerHTML = S.audio.available
+    ? `<h3 class="ok">AudioClient 可用</h3><div class="note">文档要求 vui_service ≥ 2.3.0.1。TTS/音量/LED 均按下方面板实测。</div>`
+    : `<h3 class="err">AudioClient 不可用</h3><div class="note">${S.audio.error || ""}
+      — sdk2py 未提供该客户端或服务未响应，这本身是一条实测结论。</div>`;
+  const am = S.audio_msg;
+  if (am) {
+    kv($("amsg-kv"), [["频率 Hz", am.hz], ["年龄 ms", am.age_ms, am.age_ms < 5000 ? "ok" : "err"]]);
+    const payload = am.json || {};
+    $("amsg-text").innerHTML = am.json
+      ? `识别：<b>${payload.text ?? "—"}</b> 方位 ${payload.angle ?? "—"}° 置信 ${payload.confidence ?? "—"}`
+        + (payload.play_state !== undefined ? ` 播放状态 ${payload.play_state}` : "")
+      : `原始：${am.text.slice(0, 120)}`;
+  } else {
+    kv($("amsg-kv"), [["rt/audio_msg", S.audio_msg_ok ? "无消息（需唤醒模式）" : "订阅失败", "err"]]);
+    $("amsg-text").textContent = "";
+  }
+  const lastVolume = S.audio.log.find((entry) => entry.method === "GetVolume");
+  $("vol-now").textContent = lastVolume && lastVolume.data !== null && lastVolume.data !== undefined
+    ? `当前 ${lastVolume.data}` : "";
+  const mic = S.mic;
+  kv($("mic-kv"), [["状态", mic.listening ? "监听中" : "停止"],
+    ["码率 B/s", mic.bytes_per_s, mic.bytes_per_s > 1000 ? "ok" : ""],
+    ["录音", mic.recording ? "进行中" : mic.wav_ready ? "完成" : "—"]]);
+  $("mic-dl").style.display = mic.wav_ready ? "inline-block" : "none";
+  if (mic.wav_ready) $("mic-dl").href = "/api/mic/wav";
+  $("audiolog").querySelector("tbody").innerHTML = S.audio.log.map((entry) => `
+    <tr><td class="l">${entry.t}</td><td class="l"><b>${entry.method}</b></td>
+    <td class="l">${JSON.stringify(entry.args)}</td>
+    <td class="${entry.code === 0 ? "ok" : "err"}">${fmt(entry.code)}</td><td>${entry.elapsed_ms}</td>
+    <td class="l ${entry.error ? "err" : ""}">${entry.error || ""}</td></tr>`).join("");
+
+  // 拍照
+  $("video-avail").innerHTML = S.video.available
+    ? `<h3 class="ok">VideoClient 可用</h3><div class="note">点击拍照验证 GetImageSample。</div>`
+    : `<h3 class="err">VideoClient 不可用</h3><div class="note">${S.video.error || ""}
+      — 同上，属于实测结论。</div>`;
+}
+
+// ---------- 轮询 ----------
+(async function loop() {
+  try {
+    const reply = await fetch("/api/state");
+    S = await reply.json();
+    render();
+  } catch (err) { /* PC3 重启等情况，下轮再试 */ }
+  setTimeout(loop, 200);
+})();
+</script>
+</body>
+</html>
