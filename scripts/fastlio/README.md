@@ -10,7 +10,7 @@
 | `Dockerfile` | `deps` 阶段 = noetic + PCL/tf2/eigen_conversions/GTSAM(源码编译，focal 无包)/Livox-SDK2；`verify` 阶段在工作站 QEMU 下全量验证依赖 |
 | `build_ws.sh` | 容器内首次编译：清残留 toplevel、导航包 CATKIN_IGNORE、三段编译（消息头→驱动→建图节点，上游未挂消息依赖） |
 | `h2_extra/h2_mapping_headless.launch` | 只启动雷达驱动 + map_builder（无 rviz/octomap） |
-| `h2_extra/h2_map_bridge.py` | 建图数据桥：订阅 `/body_cloud`+`/slam_odom`，世界系体素累计（与是否移动无关），HTTP :8097 提供 `/map /pose /path` |
+| `h2_map_bridge.py` | 建图数据桥：订阅 `/body_cloud`+`/slam_odom`+`/livox/imu`，世界系体素累计（与是否移动无关），HTTP :8097 提供 `/map /pose /path`；`/pose` 含里程计与 IMU 各自的采样年龄、`imu_valid` 有效标志和 `bridge_boot` 启动标识（2026-11-20 任务书第五节：位姿与 IMU 独立计龄，HTTP 轮询不刷新有效性） |
 | `pc3-setup.sh` / `pc3-first-build.sh` | PC3 侧安装/首编脚本（用 `sudo bash` 运行） |
 
 ## 镜像构建（工作站，需外网与 docker/qemu-user-static）

@@ -281,6 +281,48 @@ def test_fastlio_pose_requires_fresh_age(monkeypatch):
     assert field.fastlio_pose() is None
 
 
+def test_fastlio_pose_rejects_stale_odometry(monkeypatch):
+    # 里程计停更但 HTTP 正常：age_ms 持续增大，超过过期线视为无效
+    stale = BytesIO(json.dumps({"x": 0.1, "y": 0.2, "z": 0.0, "yaw": 0.3,
+                                "age_ms": 3000, "imu_yaw": 0.01,
+                                "imu_valid": True, "imu_age_ms": 50}).encode())
+    urlopen = MagicMock(return_value=stale)
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    assert field.fastlio_pose() is None
+
+    fresh = BytesIO(json.dumps({"x": 0.1, "y": 0.2, "z": 0.0, "yaw": 0.3,
+                                "age_ms": 90, "imu_yaw": 0.01,
+                                "imu_valid": True, "imu_age_ms": 40,
+                                "bridge_boot": "20261120T120000"}).encode())
+    urlopen = MagicMock(return_value=fresh)
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(request=SimpleNamespace(urlopen=urlopen)))
+    pose = field.fastlio_pose()
+    assert pose is not None and pose["imu_valid"] is True
+
+
+INTERRUPT = "巡检中断，等待人工处理。"
+def test_asr_session_and_commands_passthrough(monkeypatch):
+    posts = []
+    gets = []
+
+    def urlopen(request, timeout=None):
+        # GET 传字符串 URL，POST 传 Request 对象，两种形态都要兼容
+        if isinstance(request, str):
+            gets.append(request)
+            return BytesIO(json.dumps({"items": [], "last_seq": 0, "boot_id": "b1"}).encode())
+        posts.append((request.full_url, json.loads(request.data)))
+        return BytesIO(json.dumps({"ok": True, "session_id": "s9",
+                                   "boot_id": "b1"}).encode())
+
+    monkeypatch.setattr(field, "urllib", SimpleNamespace(
+        request=SimpleNamespace(urlopen=urlopen, Request=urllib.request.Request)))
+    assert field.asr_arm_session()["session_id"] == "s9"
+    assert posts[0][0] == f"http://{field.PC3}:8098/asr/session"
+    assert posts[0][1] == {"action": "arm"}
+    assert field.asr_commands(5)["boot_id"] == "b1"
+    assert gets[0].endswith("/asr/commands?since=5")
+
+
 def test_data_valve_close_gates_data_and_keeps_services(settings, gateway, monkeypatch, valves_default):
     hardware_app = create_app(replace(settings, hardware_teleop=True), gateway)
     monkeypatch.setattr(field, "vision", Mock(return_value={"available": True}))

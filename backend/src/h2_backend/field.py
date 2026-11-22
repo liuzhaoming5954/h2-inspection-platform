@@ -9,6 +9,7 @@ PC3 网关进程和两条 SSH 转发通道。
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -306,20 +307,103 @@ def say(text: str) -> bool:
         return False
 
 
+POSE_STALE_MS = 2000     # 里程计采样过期线（10Hz 源，抖动余量）
+
+def calibrate_imu_bias() -> dict | None:
+    """转向前校零：桥采样 1 秒陀螺取均值作为零偏扣除（消除温漂累计）。"""
+    request = urllib.request.Request(
+        f"http://{PC3}:8097/imu/calibrate", method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.load(response)
+    except Exception:
+        return None
+
+
 def fastlio_pose(timeout: float = 1.0) -> dict | None:
     """轻量拉取 FastLIO 位姿，演示序列执行器高频轮询用。
 
-    桥在尚未收到位姿时返回 age_ms=null，视为无效。map_data 的 5 秒
-    超时面向 MB 级点云，位姿这里放宽不得。
+    桥在尚未收到位姿时返回 age_ms=null，视为无效；里程计停更但 HTTP
+    仍可达时 age_ms 持续增大，超过过期线同样视为无效（任务书第五节：
+    HTTP 轮询本身不能刷新有效性）。IMU 字段（imu_yaw/imu_age_ms/
+    imu_valid）透传，由调用方按需校验。
     """
     try:
         with urllib.request.urlopen(f"http://{PC3}:8097/pose", timeout=timeout) as response:
             payload = json.load(response)
     except Exception:
         return None
-    if not isinstance(payload, dict) or payload.get("age_ms") is None:
+    if not isinstance(payload, dict):
+        return None
+    age = payload.get("age_ms")
+    if not isinstance(age, (int, float)) or age > POSE_STALE_MS:
         return None
     return payload
+
+
+def asr_health() -> dict | None:
+    """识别服务全量健康（含 mic_recent 数据流心跳）；不可达返回 None。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8098/health", timeout=1.5) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def reset_pc3_mic() -> dict:
+    """麦克风 USB 设备复位（修复 XVF3800 挂死：句柄活着但零数据）。
+
+    2026-11-21 现场实证：USB 总线 unbind/bind 后设备即恢复出数。
+    作为「巡检准备」检查到麦克风无数据时的一键修复动作。
+    固件级 REBOOT（更轻量）由 asr_service 内置，此处是兜底手段。"""
+    try:
+        password = shlex.quote(_password())
+        _ssh(PC3, "pkill arecord 2>/dev/null; true", timeout=5)
+        _ssh(PC3, f"echo {password} | sudo -S -p '' sh -c "
+                  "'echo 1-2 > /sys/bus/usb/drivers/usb/unbind; "
+                  "sleep 2; echo 1-2 > /sys/bus/usb/drivers/usb/bind' 2>/dev/null",
+             timeout=10)
+        time.sleep(2)
+        return {"ok": True}
+    except (FieldError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "error": str(error)[:120]}
+
+
+INTERRUPT = "巡检中断，等待人工处理。"
+def _asr_json_post(path: str, body: dict) -> dict | None:
+    request = urllib.request.Request(f"http://{PC3}:8098{path}",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.load(response)
+    except Exception:
+        return None
+
+
+def asr_arm_session() -> dict | None:
+    """开启演示待命会话；服务不可用返回 None。"""
+    return _asr_json_post("/asr/session", {"action": "arm"})
+
+
+def asr_disarm_session() -> None:
+    """解除待命会话（尽力而为；服务不在时无需解除）。"""
+    with contextlib.suppress(Exception):
+        _asr_json_post("/asr/session", {"action": "disarm"})
+
+
+def asr_commands(since: int = 0) -> dict | None:
+    """拉取口令命令事件（boot_id/会话 id/年龄由 DemoService 校验）。"""
+    try:
+        with urllib.request.urlopen(f"http://{PC3}:8098/asr/commands?since={since}",
+                                    timeout=2) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def start_pc3_asr() -> dict:
@@ -347,6 +431,31 @@ def start_pc2_vision() -> dict:
         if vision_frame_ready():
             break
     return {"ok": vision_frame_ready(), "already": False}
+
+
+def ensure_usb_audio_power() -> None:
+    """一次性修复 Jetson USB 节电（2026-11-21 确认根因：XVF3800 的 USB
+    autosuspend 在 2 秒空闲后挂起设备，音频等时传输停止 = 麦克风挂死）。
+
+    写 udev 规则 + 立即生效，每次「巡检准备」幂等调用。"""
+    rule_file = "/etc/udev/rules.d/98-respeaker-usb-power.rules"
+    check = _ssh(PC3, f"test -f {rule_file} && echo yes || echo no", timeout=5)
+    if check == "yes":
+        return    # 已修复过
+    # udev 规则内容用 base64 传过去写文件，避开多层 shell 引号嵌套
+    import base64
+    rule_content = ('ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2886", '
+                    'ATTR{idProduct}=="001a", ATTR{power/autosuspend}="-1", '
+                    'ATTR{power/control}="on"\n')
+    encoded = base64.b64encode(rule_content.encode()).decode()
+    password = shlex.quote(_password())
+    _ssh(PC3, f"echo {password} | sudo -S -p '' sh -c "
+              f"'echo -1 > /sys/bus/usb/devices/1-2/power/autosuspend 2>/dev/null; "
+              f"echo on > /sys/bus/usb/devices/1-2/power/control 2>/dev/null; "
+              f"echo on > /sys/bus/usb/devices/usb1/power/control 2>/dev/null; "
+              f"echo on > /sys/bus/usb/devices/usb2/power/control 2>/dev/null; "
+              f"echo {encoded} | base64 -d > {rule_file}; "
+              f"udevadm control --reload-rules' 2>/dev/null", timeout=15)
 
 
 def _ensure_docker_group() -> None:

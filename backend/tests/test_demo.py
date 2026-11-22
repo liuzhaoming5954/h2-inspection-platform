@@ -33,6 +33,7 @@ def wait_phase(client, phase, timeout=20.0):
 @pytest.fixture
 def fast_timing(monkeypatch):
     """压缩执行器的真实等待，测试只验证行为不验证墙钟。"""
+    monkeypatch.setattr(demo_module, "STALL_SECONDS", 2.0)   # 测试收紧停滞窗口
     monkeypatch.setattr(demo_module, "FRAME_INTERVAL", 0.02)
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_BURST", 0.02)
     # 替身网关停步无惯性（不会像真机那样被停距带入接受窗），
@@ -271,18 +272,30 @@ def field_stub(monkeypatch, motion_gateway):
     stub = FieldStub()
 
     monkeypatch.setattr(field, "start_pc3_voice", lambda: {"ok": True, "already": False})
+    monkeypatch.setattr(field, "ensure_usb_audio_power", lambda: None)
+    monkeypatch.setattr(field, "voice_ready", lambda: True)
     monkeypatch.setattr(field, "say", lambda text: stub.says.append(text) or True)
-    # _say_quiet 播报前后的采音开关走桩，不触真机
-    monkeypatch.setattr(field, "_asr_post", lambda path: {"ok": True})
+    # 会话化口令接口（v3）：默认无事件、会话固定
+    monkeypatch.setattr(field, "asr_arm_session",
+                        lambda: {"ok": True, "session_id": "sess-1", "boot_id": "boot-1"})
+    monkeypatch.setattr(field, "asr_disarm_session", lambda: None)
+    monkeypatch.setattr(field, "asr_commands",
+                        lambda since=0: {"items": [], "last_seq": 0, "boot_id": "boot-1",
+                                         "session": {"id": "sess-1", "consumed": False}})
     monkeypatch.setattr(field, "set_data_valve",
                         lambda name, enabled: {"ok": True, "enabled": True})
+    # 就绪检查项（两段式准备）：全绿
+    monkeypatch.setattr(field, "asr_health",
+                        lambda: {"model_ready": True, "capturing": True, "mic_recent": True,
+                                 "inference": {"fault": False}})
+    monkeypatch.setattr(field, "vision_frame_ready", lambda: True)
     # 位姿跟随替身网关的积分结果（硬件模式执行器从 fastlio_pose 读反馈）
     # imu_yaw 模拟桥的陀螺积分：原生日志号右转为正（与 gw.yaw 左正相反）
     monkeypatch.setattr(field, "fastlio_pose",
                         lambda timeout=1.0: {"x": motion_gateway.x, "y": 0.0, "z": 0.0,
                                              "yaw": motion_gateway.yaw, "age_ms": 10,
-                                             "imu_yaw": -motion_gateway.yaw})
-    monkeypatch.setattr(field, "asr_text", lambda since=0: {"items": [], "last_id": 0})
+                                             "imu_yaw": -motion_gateway.yaw,
+                                             "imu_valid": True, "imu_age_ms": 40})
     monkeypatch.setattr(field, "DATA_VALVES", {"vision": True, "mapping": True, "asr": True})
     return stub
 
@@ -293,30 +306,34 @@ def test_demo_voice_flow_greeting_trigger_completion(settings, gateway, monkeypa
     application = hardware_client(settings, gateway)
     # 执行器仍用替身（运动通道不在本测试范围）
     application.state.demo._make_client = lambda target, timeout: motion_gateway
-    # 口令在武装后才出现；基线调用（_watch_keyword 的第一次拉取）不返回文本，
-    # 与真实语义一致：基线只取 last_id，历史一律作废
+    # 口令在武装后出现：会话事件由识别服务完成整句判定后下发
     command = threading.Event()
-    seen_baseline = {"done": False}
 
-    def asr_text(since=0):
-        if not seen_baseline["done"]:
-            seen_baseline["done"] = True
-            return {"items": [], "last_id": 0}
-        items = [{"id": 2, "ts": time.time(), "text": "现在开始巡检"}] if command.is_set() else []
-        return {"items": [item for item in items if item["id"] > since],
-                "last_id": items[-1]["id"] if items else 0}
-    monkeypatch.setattr(field, "asr_text", asr_text)
+    def asr_commands(since=0):
+        items = [{"seq": 1, "boot_id": "boot-1", "session_id": "sess-1",
+                  "text": "开始", "age_ms": 800}] if command.is_set() else []
+        return {"items": [item for item in items if item["seq"] > since],
+                "last_seq": items[-1]["seq"] if items else 0, "boot_id": "boot-1",
+                "session": {"id": "sess-1", "consumed": False}}
+    monkeypatch.setattr(field, "asr_commands", asr_commands)
 
     with TestClient(application) as client:
         routes = client.get("/api/demo/routes").json()
         single = next(route for route in routes if route["name"] == "单步测试")
+        client.post("/api/demo/prepare")
+        wait_phase(client, "prepared")
         assert client.post("/api/demo/start", json={"route_id": single["id"]}).json()["ok"]
         wait_phase(client, "armed")
         command.set()
         state = wait_phase(client, "done")
         assert state["step_index"] == 1
-        # 话术顺序：问候 → 确认 → 完成；执行中的中断播报不应出现
-        assert field_stub.says == [demo_module.GREETING, demo_module.CONFIRM, demo_module.DONE]
+        # 话术顺序（旁白式）：准备就绪 → 问候 → 确认 → 雷达旁白×2 →
+        # 图像旁白×2 → 巡检开始 → 完成
+        assert field_stub.says == [demo_module.PREPARED_TEXT, demo_module.GREETING,
+                                   demo_module.CONFIRM,
+                                   demo_module.NARRATE_MAPPING, demo_module.MAPPING_READY,
+                                   demo_module.NARRATE_VISION, demo_module.VISION_READY,
+                                   demo_module.DEMO_GO, demo_module.DONE]
         assert motion_gateway.released
 
 
@@ -326,15 +343,16 @@ def test_demo_history_text_does_not_trigger(settings, gateway, monkeypatch,
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
 
-    def asr_text(since=0):
-        # 转写桩按 since 过滤，与真实服务一致；恒定只有一条历史记录
-        items = [{"id": 1, "ts": time.time(), "text": "开始吃饭了"}]
-        return {"items": [item for item in items if item["id"] > since], "last_id": 1}
-    monkeypatch.setattr(field, "asr_text", asr_text)
+    # 历史文本不再参与触发（整句判定在识别服务，上位机只收会话事件）
+    monkeypatch.setattr(field, "asr_commands",
+                        lambda since=0: {"items": [], "last_seq": 0, "boot_id": "boot-1",
+                                         "session": {"id": "sess-1", "consumed": False}})
 
     with TestClient(application) as client:
         routes = client.get("/api/demo/routes").json()
         single = next(route for route in routes if route["name"] == "单步测试")
+        client.post("/api/demo/prepare")
+        wait_phase(client, "prepared")
         client.post("/api/demo/start", json={"route_id": single["id"]})
         wait_phase(client, "armed")
         time.sleep(1.0)                      # 历史文本在场，但不应触发
@@ -372,6 +390,55 @@ def test_demo_hardware_turn_uses_imu_feedback(settings, gateway, monkeypatch,
         assert state["step_index"] == 1
         assert motion_gateway.yaw == pytest.approx(math.pi / 2, abs=math.radians(6))
         assert "turn_left_slow" in motion_gateway.actions
+
+
+def test_demo_hardware_turn_requires_fresh_imu(settings, gateway, monkeypatch,
+                                                motion_gateway, fast_timing, field_stub):
+    """转向闭环强制要求有效 IMU：桥未提供/停更时中止而非回退扫描 yaw。"""
+    application = hardware_client(settings, gateway)
+    application.state.demo._make_client = lambda target, timeout: motion_gateway
+    monkeypatch.setattr(field, "fastlio_pose",
+                        lambda timeout=1.0: {"x": motion_gateway.x, "y": 0.0, "z": 0.0,
+                                             "yaw": motion_gateway.yaw, "age_ms": 10})
+    with TestClient(application) as client:
+        body = {"name": "无IMU转向", "steps": [{"type": "turn", "value": 90}]}
+        route_id = client.post("/api/demo/routes", json=body).json()["id"]
+        client.post(f"/api/demo/routes/{route_id}/run")
+        state = wait_phase(client, "aborted")
+        assert "IMU 数据无效" in state["detail"]
+
+
+def test_demo_two_stage_prepare_then_start(settings, gateway, monkeypatch,
+                                            motion_gateway, fast_timing, field_stub):
+    """两段式：未准备点演示被拒；准备全绿→播报就绪；六项检查可见。"""
+    application = hardware_client(settings, gateway)
+    application.state.demo._make_client = lambda target, timeout: motion_gateway
+    with TestClient(application) as client:
+        routes = client.get("/api/demo/routes").json()
+        single = next(route for route in routes if route["name"] == "单步测试")
+        denied = client.post("/api/demo/start", json={"route_id": single["id"]})
+        assert denied.status_code == 409
+        assert "巡检准备" in denied.json()["detail"]
+        assert client.post("/api/demo/prepare").json()["ok"]
+        state = wait_phase(client, "prepared")
+        # 准备阶段只查语音两项；其余项在演示旁白中逐个点亮
+        assert all(state["checks"].values()) and len(state["checks"]) == 2
+        assert demo_module.PREPARED_TEXT in field_stub.says
+
+
+def test_demo_prepare_reports_failure_item(settings, gateway, monkeypatch,
+                                            motion_gateway, fast_timing, field_stub):
+    """准备阶段检查不绿：麦克风无数据 → 超时进入准备失败并指明检查项。"""
+    monkeypatch.setattr(demo_module, "PREPARE_TIMEOUT_S", 6.0)
+    monkeypatch.setattr(field, "asr_health",
+                        lambda: {"model_ready": True, "capturing": True,
+                                 "mic_recent": False, "inference": {"fault": False}})
+    monkeypatch.setattr(field, "reset_pc3_mic", lambda: {"ok": True})
+    application = hardware_client(settings, gateway)
+    with TestClient(application) as client:
+        assert client.post("/api/demo/prepare").json()["ok"]
+        state = wait_phase(client, "prep_failed", timeout=30)
+        assert "准备超时" in state["detail"]
 
 
 def test_demo_start_rejected_in_simulation(client):

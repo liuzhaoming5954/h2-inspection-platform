@@ -45,11 +45,18 @@ class ReviewInput(BaseModel):
 
 
 class RouteStepInput(BaseModel):
-    """演示路线的单个步骤：前进(米)/转向(度，左转为正)/停留(秒)。"""
+    """演示路线的单个步骤：前进(米)/转向(度，左转为正)/停留(秒)。
+
+    停留步可挂一个识别任务（task）：qr=朗读二维码内容、led=播报信号灯
+    数量与颜色、person=播报人数。同一时刻只执行当前步的任务，行进中
+    和其他任务字段一律忽略（2026-11-21 确认的每站单任务设计）。
+    兼容旧字段 read_aloud=True 等价于 task="qr"。
+    """
     model_config = ConfigDict(extra="forbid")
     type: Literal["forward", "turn", "wait"]
     value: float = Field(allow_inf_nan=False)
-    read_aloud: bool = False
+    task: Literal["qr", "led", "person"] | None = None
+    read_aloud: bool = False   # 已废弃，等价于 task="qr"
 
     @model_validator(mode="after")
     def step_bounds(self) -> "RouteStepInput":
@@ -59,6 +66,8 @@ class RouteStepInput(BaseModel):
             raise ValueError("转向角度需在 ±180° 之间且不为零")
         if self.type == "wait" and not 0.5 <= self.value <= 60:
             raise ValueError("停留时长需在 0.5–60 秒之间")
+        if self.task and self.type != "wait":
+            raise ValueError("只有停留步支持识别任务")
         if self.read_aloud and self.type != "wait":
             raise ValueError("只有停留步支持朗读识别结果")
         return self
@@ -246,7 +255,12 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     @demo_routes.post("/routes", status_code=201)
     def demo_create_route(payload: RouteInput):
-        return demo.create_route(payload.model_dump())
+        data = payload.model_dump()
+        for step in data["steps"]:
+            # 兼容旧字段：read_aloud=True → task="qr"
+            if step.pop("read_aloud", False) and step.get("task") is None:
+                step["task"] = "qr"
+        return demo.create_route(data)
 
     @demo_routes.delete("/routes/{route_id}")
     def demo_delete_route(route_id: str):
@@ -255,6 +269,11 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
     @demo_routes.get("/state")
     def demo_state():
         return demo.state()
+
+    @demo_routes.post("/prepare")
+    def demo_prepare():
+        # 「巡检准备」：一键拉起全部服务并做功能性就绪检测，全绿后播报就绪
+        return demo.prepare()
 
     @demo_routes.post("/start")
     def demo_start(payload: DemoStartRequest):

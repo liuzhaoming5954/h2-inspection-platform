@@ -11,7 +11,7 @@ import { errorMessage, request, type DemoRoute, type DemoState, type DemoStep, t
 const props = defineProps<{ hardware: boolean }>()
 const emit = defineEmits<{ activeChange: [active: boolean] }>()
 
-interface DraftStep { type: DemoStepType; value: number; read_aloud: boolean }
+interface DraftStep { type: DemoStepType; value: number; task: 'qr' | 'led' | 'person' | null }
 
 const routes = ref<DemoRoute[]>([])
 const selectedId = ref('')
@@ -24,9 +24,17 @@ const draftSteps = ref<DraftStep[]>([])
 
 const selected = computed(() => routes.value.find(route => route.id === selectedId.value) ?? null)
 const phase = computed(() => state.value?.phase ?? 'idle')
-const demoBusy = computed(() => ['starting', 'armed', 'running'].includes(phase.value))
+// 「已就绪」不算忙：准备成功的瞬间必须亮出巡检演示按钮（2026-11-21 现场
+// 反馈的缺陷：prepared 误入 busy 集合导致按钮在应亮起时反而消失）
+const demoBusy = computed(() => ['preparing', 'starting', 'armed', 'running'].includes(phase.value))
+const prepared = computed(() => phase.value === 'prepared')
 const phaseNames: Record<string, string> = {
-  idle: '未启动', starting: '拉起服务', armed: '待命听令', running: '执行中', done: '已完成', aborted: '已中止',
+  idle: '未启动', preparing: '准备中', prepared: '已就绪', prep_failed: '准备失败',
+  starting: '演示开始', armed: '待命听令', running: '执行中', done: '已完成', aborted: '已中止',
+}
+// 就绪检查项（与后端 CHECK_LABELS 对应）
+const checkLabels: Record<string, string> = {
+  mic: '麦克风数据流', asr: '语音识别', pose: '建图位姿', imu: 'IMU 转角', vision: '相机画面', teleop: '运控就绪',
 }
 
 watch(demoBusy, active => emit('activeChange', active))
@@ -58,10 +66,29 @@ async function loadRoutes() {
 function stepText(step: DemoStep): string {
   if (step.type === 'forward') return `前进 ${step.value} m`
   if (step.type === 'turn') return `${step.value >= 0 ? '左转' : '右转'} ${Math.abs(step.value)}°`
-  return `停留 ${step.value} s${step.read_aloud ? ' · 朗读识别' : ''}`
+  const task = step.task ?? (step.read_aloud ? 'qr' : null)
+  return `停留 ${step.value} s${task ? ' · ' + ({ qr: '朗读二维码', led: '播报信号灯', person: '播报人数' } as Record<string,string>)[task] : ''}`
 }
 
-/** 打开演示开关：后端依次拉服务、播问候语并武装语音触发（仅真机模式）。 */
+/** 「巡检准备」：一键拉起全部服务并做功能性就绪检测，全绿后播报就绪。 */
+async function prepareDemo() {
+  if (busy.value || prepared.value) return
+  busy.value = 'prepare'
+  message.value = ''
+  try {
+    // 冷启动建图最长约 30 秒，准备总时限后端 150 秒，前端放宽
+    await request<{ ok: boolean }>('/api/demo/prepare', {
+      method: 'POST', signal: AbortSignal.timeout(180_000),
+    })
+    void pollState()
+  } catch (error) {
+    message.value = `失败：${errorMessage(error)}`
+  } finally {
+    busy.value = ''
+  }
+}
+
+/** 打开演示开关：要求先「巡检准备」就绪，后端播问候语并武装语音触发。 */
 async function startDemo() {
   if (!selected.value || busy.value) return
   busy.value = 'start'
@@ -111,8 +138,8 @@ function beginEdit() {
   const source = selected.value
   draftName.value = source ? `${source.name}副本` : '新路线'
   draftSteps.value = source
-    ? source.steps.map(step => ({ type: step.type, value: step.value, read_aloud: step.read_aloud === true }))
-    : [{ type: 'forward', value: 0.3, read_aloud: false }]
+    ? source.steps.map(step => ({ type: step.type, value: step.value, task: step.task ?? (step.read_aloud ? 'qr' : null) }))
+    : [{ type: 'forward', value: 0.3, task: null }]
   editing.value = true
 }
 
@@ -125,7 +152,7 @@ function toggleEdit() {
 }
 
 function addStep() {
-  draftSteps.value.push({ type: 'forward', value: 0.3, read_aloud: false })
+  draftSteps.value.push({ type: 'forward', value: 0.3, task: null })
 }
 
 function removeStep(index: number) {
@@ -153,7 +180,7 @@ async function saveRoute() {
         name: draftName.value.trim(),
         steps: draftSteps.value.map(step => ({
           type: step.type, value: Number(step.value),
-          ...(step.type === 'wait' && step.read_aloud ? { read_aloud: true } : {}),
+          ...(step.type === 'wait' && step.task ? { task: step.task } : {}),
         })),
       }),
     })
@@ -198,13 +225,22 @@ onBeforeUnmount(() => {
       <select v-model="selectedId" class="demo-select" data-testid="demo-route-select" aria-label="选择路线" :disabled="demoBusy || editing">
         <option v-for="route in routes" :key="route.id" :value="route.id">{{ route.name }}（{{ route.steps.length }} 步）</option>
       </select>
+      <button v-if="props.hardware && !demoBusy" class="demo-prepare" type="button" data-testid="demo-prepare"
+              :disabled="!!busy" @click="prepareDemo">⚙ 巡检准备</button>
       <button v-if="props.hardware && !demoBusy" class="data-valve" type="button" data-testid="demo-start"
-              :disabled="!selected || !!busy" @click="startDemo">⏻ 巡检演示</button>
-      <button v-else-if="demoBusy" class="demo-stop" type="button" data-testid="demo-stop"
+              :disabled="!selected || !!busy || !prepared" :title="prepared ? '' : '请先点击「巡检准备」并等待就绪播报'"
+              @click="startDemo">⏻ 巡检演示</button>
+      <button v-if="props.hardware && demoBusy" class="demo-stop" type="button" data-testid="demo-stop"
               :disabled="!!busy" @click="stopDemo">■ 停止演示</button>
       <button class="demo-run" type="button" data-testid="demo-run"
               :disabled="!selected || !!busy || demoBusy || editing" @click="runManual">手动执行</button>
       <button class="demo-edit" type="button" data-testid="demo-edit" :disabled="demoBusy" @click="toggleEdit">{{ editing ? '收起编辑' : '编辑路线' }}</button>
+    </div>
+
+    <div v-if="props.hardware && Object.keys(state?.checks ?? {}).length" class="demo-checks" data-testid="demo-checks">
+      <span v-for="(ok, key) in state?.checks" :key="key" :class="['demo-check', { on: ok }]">
+        <i></i>{{ checkLabels[key] ?? key }}
+      </span>
     </div>
 
     <div v-if="editing" class="demo-editor">
@@ -216,7 +252,12 @@ onBeforeUnmount(() => {
           <option value="wait">停留 s</option>
         </select>
         <input v-model.number="step.value" class="demo-input demo-step-value" type="number" step="0.1" :aria-label="`第 ${index + 1} 步数值`" />
-        <label v-if="step.type === 'wait'" class="demo-aloud"><input v-model="step.read_aloud" type="checkbox" />朗读</label>
+        <select v-if="step.type === 'wait'" v-model="step.task" class="demo-select demo-step-task">
+          <option :value="null">无任务</option>
+          <option value="qr">朗读二维码</option>
+          <option value="led">播报信号灯</option>
+          <option value="person">播报人数</option>
+        </select>
         <span class="demo-step-ops">
           <button type="button" :disabled="index === 0" @click="moveStep(index, -1)">↑</button>
           <button type="button" :disabled="index === draftSteps.length - 1" @click="moveStep(index, 1)">↓</button>
@@ -262,6 +303,13 @@ onBeforeUnmount(() => {
 .demo-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .demo-select, .demo-input { border: 1px solid #c9d6de; border-radius: 6px; padding: 5px 8px; font-size: 12px; background: #fff; color: #22333f; }
 .demo-select { max-width: 220px; }
+.demo-prepare { border: 1px solid #c9a227; color: #8a6d1a; font-weight: 600; border-radius: 6px; padding: 5px 10px; font-size: 12px; background: #fff; cursor: pointer; }
+/* 就绪检查灯：准备阶段实时显示六项功能判据 */
+.demo-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 4px 2px; }
+.demo-check { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #93a7b4; }
+.demo-check i { width: 8px; height: 8px; border-radius: 50%; background: #c3d0d9; }
+.demo-check.on { color: #1d7a5f; }
+.demo-check.on i { background: #35a18c; box-shadow: 0 0 4px rgba(53, 161, 140, .8); }
 .demo-run, .demo-edit, .demo-stop, .demo-save, .demo-delete, .demo-editor-ops button, .demo-step-ops button {
   border: 1px solid #c9d6de; border-radius: 6px; padding: 5px 10px; font-size: 12px; background: #fff; color: #2c3e4c; cursor: pointer;
 }

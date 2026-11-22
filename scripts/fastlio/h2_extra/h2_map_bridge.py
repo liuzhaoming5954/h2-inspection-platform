@@ -50,8 +50,14 @@ _pose_mono = 0.0
 _path_points: list[tuple[float, float, float]] = []
 # Mid360 内置 IMU 陀螺 z 积分：快速原地旋转时扫描匹配会滞后/滑移，
 # 旋转闭环用它做反馈（原生日志号：实测右转为正，与 ROS 左正相反）。
+# _imu_mono 用本机单调接收时刻计龄：HTTP 轮询、重复样本或停更的源
+# 时间戳都不能刷新有效性；尚无样本时显式置无效，防止初始 0 被当成
+# 实际转角（2026-11-20 任务书第五节）。
 _imu_yaw = 0.0
 _imu_last_t = None
+_imu_mono = None
+_imu_bias = 0.0   # 陀螺零偏（rad/s），POST /imu/calibrate 时采样设置
+_BRIDGE_BOOT = time.strftime("%Y%m%dT%H%M%S")   # 桥进程启动标识，区分重启
 _path_payload = b""
 _last_path_xyz: tuple[float, float, float] | None = None
 
@@ -91,14 +97,35 @@ def on_odom(odom: Odometry) -> None:
 
 def on_imu(msg: Imu) -> None:
     """陀螺积分（约 200Hz，仅取小锁更新，不与点云累计互卡）。"""
-    global _imu_yaw, _imu_last_t
+    global _imu_yaw, _imu_last_t, _imu_mono
     stamp = msg.header.stamp.to_sec()
     t = stamp if stamp > 0.0 else time.time()
     with _pose_lock:
         last = _imu_last_t
         if last is not None and 0.0 < t - last < 0.1:
-            _imu_yaw += msg.angular_velocity.z * (t - last)
+            _imu_yaw += (msg.angular_velocity.z - _imu_bias) * (t - last)
         _imu_last_t = t
+        _imu_mono = time.monotonic()
+        _imu_wz_samples.append(msg.angular_velocity.z)
+        del _imu_wz_samples[:-200]   # 约 1 秒的 200Hz 样本
+
+
+def calibrate_imu_bias() -> float:
+    """采样 1 秒陀螺数据取平均作为零偏（转向前调用，消除温漂累计误差）。"""
+    global _imu_bias
+    import rospy as _rospy
+    samples = []
+    start = time.monotonic()
+    # 直接从最近的消息流采样：借用回调里缓存的原始角速度
+    while time.monotonic() - start < 1.0 and not _rospy.is_shutdown():
+        time.sleep(0.01)
+    # on_imu 已在更新 _imu_last_wz（下面加这个缓存），采样期结束后取均值
+    if _imu_wz_samples:
+        _imu_bias = sum(_imu_wz_samples) / len(_imu_wz_samples)
+    _imu_wz_samples.clear()
+    return _imu_bias
+
+_imu_wz_samples: list = []   # 零偏采样窗口的原始角速度
 
 
 def on_body_cloud(cloud: PointCloud2) -> None:
@@ -195,10 +222,20 @@ class Handler(BaseHTTPRequestHandler):
                           "X-Map-Voxel": f"{VOXEL:.3f}"})
         elif self.path == "/pose":
             with _pose_lock:
-                pose, mono, imu_yaw = dict(_pose), _pose_mono, _imu_yaw
+                pose, mono = dict(_pose), _pose_mono
+                imu_yaw, imu_mono = _imu_yaw, _imu_mono
             age_ms = int(max(0.0, (time.monotonic() - mono) * 1000.0)) if mono else None
+            imu_age_ms = int(max(0.0, (time.monotonic() - imu_mono) * 1000.0)) if imu_mono else None
             self._common(json.dumps({**pose, "age_ms": age_ms,
-                                     "imu_yaw": round(imu_yaw, 6)}).encode(), "application/json")
+                                     "imu_yaw": round(imu_yaw, 6),
+                                     "imu_age_ms": imu_age_ms,
+                                     "imu_valid": imu_mono is not None,
+                                     "bridge_boot": _BRIDGE_BOOT}).encode(), "application/json")
+        elif self.path == "/imu/calibrate":
+            # 转向前校零：采样 1 秒陀螺取均值，从积分中扣除
+            bias = calibrate_imu_bias()
+            self._common(json.dumps({"ok": True, "bias": round(bias, 6)}).encode(),
+                         "application/json")
         elif self.path == "/path":
             with _map_lock:
                 payload = _path_payload

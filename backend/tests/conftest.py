@@ -25,7 +25,8 @@ class FakeGateway:
 
     def get_state(self):
         self._check()
-        return {"robot_id": "sim-test", "status": "idle", "progress": 0, "start_count": self.starts, "simulated": True}
+        return {"robot_id": "sim-test", "status": "idle", "progress": 0, "start_count": self.starts,
+                "simulated": True, "teleop_ready": True}
 
     def get_task(self, task_id):
         self._check()

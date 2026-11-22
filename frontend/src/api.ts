@@ -74,7 +74,8 @@ export type DemoStepType = 'forward' | 'turn' | 'wait'
 export interface DemoStep {
   type: DemoStepType
   value: number
-  read_aloud?: boolean
+  task?: 'qr' | 'led' | 'person' | null
+  read_aloud?: boolean   // 已废弃，等价于 task='qr'
 }
 
 export interface DemoRoute {
@@ -85,12 +86,13 @@ export interface DemoRoute {
 }
 
 export interface DemoState {
-  phase: 'idle' | 'starting' | 'armed' | 'running' | 'done' | 'aborted'
+  phase: 'idle' | 'preparing' | 'prepared' | 'prep_failed' | 'starting' | 'armed' | 'running' | 'done' | 'aborted'
   detail: string
   error: string | null
   route: DemoRoute | null
   step_index: number
   steps_total: number
+  checks: Record<string, boolean>
   hardware: boolean
 }
 
