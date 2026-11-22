@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>XVF3800 麦克风测试台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1720; color: #dbe6ee; }
+  header { padding: 14px 20px; background: #16222e; border-bottom: 1px solid #24384a; }
+  header h1 { margin: 0; font-size: 18px; }
+  header small { color: #7d93a5; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; max-width: 1200px; }
+  .card { background: #16222e; border: 1px solid #24384a; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; color: #7d93a5; margin: 0 0 10px; font-weight: 600; letter-spacing: 1px; }
+  button { background: #1f3446; color: #dbe6ee; border: 1px solid #31506a; border-radius: 8px;
+           padding: 8px 12px; font-size: 13px; cursor: pointer; margin: 0 6px 8px 0; }
+  button:hover { background: #26415a; }
+  button.warn { border-color: #8a4b3c; color: #f0b8a8; }
+  .meter-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 13px; }
+  .meter-row label { width: 110px; color: #93a7b4; }
+  .track { flex: 1; height: 14px; background: #0d151d; border-radius: 7px; overflow: hidden; position: relative; }
+  .fill { height: 100%; width: 0%; transition: width .1s linear; }
+  .fill.ch0 { background: #3d6f8f; } .fill.ch1 { background: #35a18c; }
+  .track .threshold { position: absolute; top: 0; bottom: 0; width: 2px; background: #e0a94e; }
+  .value { width: 64px; text-align: right; font-variant-numeric: tabular-nums; color: #93a7b4; }
+  .state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin: 4px 12px 4px 0; }
+  .state i { width: 10px; height: 10px; border-radius: 50%; background: #44576b; display: inline-block; }
+  .state.on i { background: #35a18c; box-shadow: 0 0 6px #35a18c; }
+  .state.warn i { background: #e0a94e; } .state.bad i { background: #c95f4d; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #223546; }
+  th { color: #7d93a5; font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; color: #93a7b4; }
+  td.text { color: #9fd6c4; }
+  .log { font-size: 12px; color: #7d93a5; max-height: 130px; overflow-y: auto; }
+  .log div { padding: 2px 0; border-bottom: 1px dashed #223546; }
+  .hint { font-size: 12px; color: #7d93a5; line-height: 1.6; }
+  .state b { font-variant-numeric: tabular-nums; }
+  .sparkline { width: 100%; height: 46px; display: block; margin-top: 6px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>XVF3800 麦克风 + 语音模型测试台</h1>
+  <small>独立于上位机链路 · 采音/切段/识别/复活手段全在本页 · 红常亮 LED = Mute 键被按（物理键恢复）</small>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>控制</h2>
+      <button id="btn-start" onclick="act('/start')">开始采音</button>
+      <button onclick="act('/stop')">停止采音</button>
+      <button id="btn-model" onclick="act('/model/on')">加载识别模型</button>
+      <h2 style="margin-top:14px">麦克风复活（按伤害从小到大）</h2>
+      <button onclick="act('/recover/reboot')">⓪ 固件 REBOOT（最轻量）</button>
+      <button onclick="act('/recover/amixer')">① amixer 通道重开</button>
+      <button class="warn" onclick="act('/recover/usb')">② USB 总线复位</button>
+      <button onclick="act('/probe')">裸采探针(2s)</button>
+      <h2 style="margin-top:14px">VAD 起声门限倍率</h2>
+      <div style="display:flex;align-items:center;gap:10px">
+        <input type="range" id="vad-ratio" min="1.5" max="8" step="0.5" value="4" style="flex:1">
+        <span class="value" id="vad-ratio-v">4.0</span>
+        <button onclick="setVad()">应用</button>
+      </div>
+      <p class="hint">说话电平刚过黄线但不切段时，把倍率调低（如 2.5）再试。</p>
+      <p class="hint">顺序建议：先②探针确认设备死活 → 死了先①amixer（wiki 记载的通道被关，无需复位）→ 仍死再②USB 复位。</p>
+    </div>
+    <div class="card">
+      <h2>操作日志</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <h2>实时状态</h2>
+      <span class="state" id="s-capture"><i></i>采音</span>
+      <span class="state" id="s-mic"><i></i>数据流</span>
+      <span class="state" id="s-vad"><i></i>VAD 说话中</span>
+      <span class="state" id="s-model"><i></i>模型</span>
+      <span class="state" id="s-hwvad"><i></i>硬件VAD</span>
+      <span class="state" id="s-doa"><i></i>DOA <b id="doa-val" style="margin-left:2px">—</b></span>
+      <div class="meter-row"><label>ch0（参考路）</label><div class="track"><div class="fill ch0" id="m0"></div><div class="threshold" id="th0"></div></div><span class="value" id="v0">0</span></div>
+      <div class="meter-row"><label>ch1（语音路）</label><div class="track"><div class="fill ch1" id="m1"></div><div class="threshold" id="th1"></div></div><span class="value" id="v1">0</span></div>
+      <div class="meter-row"><label>噪声底</label><div class="track"><div class="fill" id="mf" style="background:#44576b"></div></div><span class="value" id="vf">0</span></div>
+      <div class="meter-row"><label>ch1 峰值(10s)</label><div class="track"><div class="fill" id="mp1" style="background:#e0a94e"></div></div><span class="value" id="vp1">0</span></div>
+      <canvas class="sparkline" id="spark"></canvas>
+      <p class="hint">黄线 = 起声门限（噪声底×4）。对着麦克风说话：ch1 应显著超过黄线、VAD 变绿、下方出现切段记录。</p>
+    </div>
+    <div class="card">
+      <h2>切段与识别（新→旧）</h2>
+      <table>
+        <thead><tr><th>时间</th><th>时长(s)</th><th>择路</th><th>能量</th><th>转写</th><th>推理(ms)</th><th>总延迟(ms)</th></tr></thead>
+        <tbody id="segs"><tr><td colspan="7" class="hint">尚无切段</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const spark = document.getElementById('spark');
+const sctx = spark.getContext('2d');
+const history = [];
+function setState(id, cls) { const el = document.getElementById(id); el.className = 'state ' + cls; }
+function setVad() { const v = document.getElementById('vad-ratio').value;
+  fetch('/vad', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enter: parseFloat(v)})}); }
+function act(path) { fetch(path, {method:'POST'}).then(r=>r.json()).then(d=>{
+  if (d.detail || d.error) console.log(path, d); }).catch(e=>console.error(e)); }
+function fmt(n) { return (n==null ? '—' : n); }
+async function tick() {
+  try {
+    const s = await (await fetch('/state')).json();
+    setState('s-capture', s.capturing ? 'on' : '');
+    setState('s-mic', s.mic_recent ? 'on' : (s.capturing ? 'bad' : ''));
+    setState('s-vad', s.meter.vad ? 'on' : '');
+    setState('s-model', s.model.state === 'ready' ? 'on' : (s.model.state === 'loading' ? 'warn' : (s.model.state === 'error' ? 'bad' : '')));
+    const m = s.meter;
+    const cap = 0.12;
+    document.getElementById('m0').style.width = Math.min(100, m.rms0/cap*100) + '%';
+    document.getElementById('m1').style.width = Math.min(100, m.rms1/cap*100) + '%';
+    const floor = m.floor || 0.005;
+    document.getElementById('mf').style.width = Math.min(100, floor/cap*100) + '%';
+    document.getElementById('v0').textContent = m.rms0?.toFixed(4) ?? 0;
+    document.getElementById('v1').textContent = m.rms1?.toFixed(4) ?? 0;
+    document.getElementById('vf').textContent = floor.toFixed(4);
+    const ratio = m.enter_ratio || 4;
+    document.getElementById('vad-ratio').value = ratio;
+    document.getElementById('vad-ratio-v').textContent = Number(ratio).toFixed(1);
+    const p1 = m.peak1 || 0;
+    document.getElementById('mp1').style.width = Math.min(100, p1/cap*100) + '%';
+    document.getElementById('vp1').textContent = p1.toFixed(4);
+    const thrElem1 = document.getElementById('th1');
+    thrElem1.style.left = Math.min(99.5, floor*ratio/cap*100) + '%';
+    const thPos = Math.min(99.5, floor*4/cap*100);
+    document.getElementById('th0').style.left = thPos + '%';
+    document.getElementById('th1').style.left = thPos + '%';
+    if (m.recent) { history.push(...m.recent); while (history.length > 200) history.shift(); }
+    sctx.clearRect(0,0,spark.width,spark.height);
+    sctx.fillStyle = '#1c2c3a'; sctx.fillRect(0,0,spark.width,spark.height);
+    const max = Math.max(0.08, ...history) * 1.2;
+    sctx.fillStyle = '#35a18c';
+    history.forEach((v,i)=>{ const h = Math.min(1, v/max); sctx.fillRect(i/history.length*spark.width, spark.height*(1-h), 3, h*spark.height); });
+    const ty = spark.height * (1 - Math.min(1, floor*4/max));
+    sctx.strokeStyle = '#e0a94e'; sctx.beginPath(); sctx.moveTo(0,ty); sctx.lineTo(spark.width,ty); sctx.stroke();
+    // 硬件 VAD + 声源方向（XVF3800 芯片级，pyusb 读取）
+    const hw = s.hw_vad || {};
+    setState('s-hwvad', hw.speech ? 'on' : (hw.poll_ms ? '' : 'warn'));
+    document.getElementById('doa-val').textContent = hw.doa != null && hw.doa >= 0 ? hw.doa + '°' : '—';
+    const segs = document.getElementById('segs');
+    if (s.segments.length) {
+      segs.innerHTML = s.segments.slice().reverse().map(x =>
+        `<tr><td class="num">${x.t}</td><td class="num">${x.seconds}</td><td class="num">ch${x.channel}</td>
+         <td class="num">${x.energy}</td><td class="text">${x.text ?? '…'}</td>
+         <td class="num">${fmt(x.infer_ms)}</td><td class="num">${fmt(x.latency_ms)}</td></tr>`).join('');
+    }
+    document.getElementById('log').innerHTML = s.log.slice().reverse().map(x=>`<div>${x.t} ${x.message}</div>`).join('');
+  } catch (e) { /* 服务重启间隙忽略 */ }
+}
+tick(); setInterval(tick, 500);
+</script>
+</body>
+</html>

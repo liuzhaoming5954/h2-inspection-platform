@@ -25,3 +25,6 @@ artifacts/
 docs/
 *.doc
 *.docx
+
+# ZCode 会话与计划文件不入库
+.zcode/

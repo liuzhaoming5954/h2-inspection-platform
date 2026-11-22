@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.etree import ElementTree
 
 ASR_TEXT_URL = "http://127.0.0.1:8098/asr/text"
+ASR_PLAYBACK_URL = "http://127.0.0.1:8098/asr/playback"
 POLL_SECONDS = 1.0
 REPLY_COOLDOWN = 8.0
 HTTP_PORT = 8099
@@ -57,21 +58,43 @@ def build_tts_client():
     return client
 
 
-TTS_SECONDS_PER_CHAR = 0.22   # 中文播报语速估算（约 4.5 字/秒），2026-11-20 现场标定
+# 播报窗口只取「快下限」（2026-11-21 两轮实测：TTS 语速逐次波动，
+# 0.13~0.2s/字不等，按均值估算的窗口忽而吞掉紧跟口令、忽而漏出机器人
+# 尾巴）。窗口提前关闭，真实的播报结束由识别服务的能量守卫自适应判定
+# （还在出声就丢、真静音 0.3 秒放行）——本估算宁短勿长。
+# 2026-11-22 修正：0.10s/字对长内容严重偏短（70 字二维码实际播 12-15s，
+# 估算只给 7s，/say 提前返回导致机器人边说边走）。恢复 0.15s/字+0.5s 余量。
+# 播报结束的精确判定由 asr_service 的能量守卫负责（还在出声就继续屏蔽），
+# 此估算宁长勿短——长了的代价是操作员稍晚开口，远好于机器人边说边走。
+TTS_SECONDS_PER_CHAR = 0.15
+TTS_MARGIN_S = 0.5
+
+
+def _mark_playback(active: bool) -> None:
+    """通知识别服务播报窗口起止（自听抑制）。识别服务不在时静默跳过。"""
+    request = urllib.request.Request(
+        ASR_PLAYBACK_URL, data=json.dumps({"active": active}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        urllib.request.urlopen(request, timeout=1)
+    except Exception:
+        pass
 
 
 def speak(text: str) -> int:
     """播报一段文本并等待播完，返回 TtsMaker 回执码（0 为成功）。
 
     TtsMaker 即发即回（实测 10ms），调用方无从得知播报时长；这里按字数
-    估算持锁等待，使 /say 具有阻塞到播完的语义——上位机据此在播报期间
-    暂停采音，避免机器人自听挤占识别队列。"""
-    import time as _time
+    估算持锁等待，使 /say 具有阻塞到播完的语义。播报起止同时标记给识别
+    服务（/asr/playback）：期间丢弃采音、交叉段不进转写也不触发口令——
+    /say 与关键词应答两路播报共用该抑制状态。"""
     with _speak_lock:
+        _mark_playback(True)
         code = _client.TtsMaker(text, 0)
         print(f"[voice] 播报 code={code}: {text[:60]}", flush=True)
         if code == 0:
-            _time.sleep(min(30.0, TTS_SECONDS_PER_CHAR * len(text) + 1.0))
+            time.sleep(min(30.0, TTS_SECONDS_PER_CHAR * len(text) + TTS_MARGIN_S))
+        _mark_playback(False)
         return code
 
 
