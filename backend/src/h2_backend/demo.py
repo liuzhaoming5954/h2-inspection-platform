@@ -714,14 +714,28 @@ class DemoService:
         target = (self._settings.teleop_gateway_address if self._hardware
                   else self._settings.gateway_address)
         client = self._make_client(target, 0.75)
+        status_client = None   # 硬件模式在 acquire 成功后创建（状态通道）
         state: dict[str, Any] = {"seq": 0, "clock": None, "token": ""}
         try:
             self._set_phase("running", "申请运动控制权…")
             state["token"], state["clock"] = self._acquire(client)
+            # 全程心跳（2026-11-21）：acquire 后立刻启动——后面的源锁定等设置
+            # 期可能耗时数秒（2026-11-23 夜间实测：设置期不续租曾饿死 2 秒
+            # 租约，第一帧即被拒），心跳必须先于一切设置动作
+            halt_hb = threading.Event()
+            def _hb() -> None:
+                while not halt_hb.wait(HEARTBEAT_INTERVAL):
+                    with suppress(Exception):
+                        self._send(client, state, "heartbeat")
+            hb_thread = threading.Thread(target=_hb, daemon=True, name="h2-demo-hb")
+            hb_thread.start()
             if self._hardware:
+                # 网关遥测走状态通道客户端：遥控口的 GetState 不含位姿遥测
+                # （状态与遥控是两条独立通道，2026-11-23 夜间实测教训）
+                status_client = self._make_client(self._settings.gateway_address, 0.75)
                 # 双通道（见 _PoseFeed 类注释）：网关快线是转向反馈与停滞
                 # 检测的生命线；FastLIO 慢线只服务精修与兜底
-                feed = _PoseFeed(lambda: self._pose_gateway(client), interval=0.1,
+                feed = _PoseFeed(lambda: self._pose_gateway(status_client), interval=0.1,
                                  name="h2-demo-pose-gw")
                 feed.start()
                 fl_feed = _PoseFeed(lambda: self._pose_fastlio(), interval=0.4,
@@ -731,13 +745,13 @@ class DemoService:
                 feed = _SyncPoseFeed(client, self)
                 fl_feed = None
             # 反馈源锁定（2026-11-23 夜间教训，见 _yaw_feedback 注释）：
-            # 等最多 2 秒让网关姿态出现（首选源），没有则锁桥 livox；
-            # 两者皆无时硬件模式直接中止。锁定后整条路线不再换源。
+            # 等到任一源出现即锁定（网关姿态首选，桥 livox 次之），
+            # 上限 2 秒；两者皆无才中止。锁定后整条路线不再换源。
             if self._hardware:
                 lock_deadline = time.monotonic() + 2.0
-                while feed.tracker.gw_yaw is None and time.monotonic() < lock_deadline:
+                while (feed.tracker.gw_yaw is None and feed.tracker.imu_yaw is None
+                       and time.monotonic() < lock_deadline):
                     time.sleep(0.1)
-                    feed.poll()
                 if feed.tracker.gw_yaw is not None:
                     self._yaw_source = "gw"
                 elif feed.tracker.imu_yaw is not None:
@@ -748,17 +762,7 @@ class DemoService:
             else:
                 self._yaw_source = "gw"   # 模拟：网关位姿即姿态角
             # 名义航向锚定：路线起点把当前实测航向定为基准（2026-11-23）
-            feed.poll()
             self._nominal_yaw = self._measured_yaw(feed)
-            # 全程心跳（2026-11-21）：贯穿所有步骤的不间断续租线程，
-            # 消除步骤切换、任务采样、播报阻塞期间的心跳断档
-            halt_hb = threading.Event()
-            def _hb() -> None:
-                while not halt_hb.wait(HEARTBEAT_INTERVAL):
-                    with suppress(Exception):
-                        self._send(client, state, "heartbeat")
-            hb_thread = threading.Thread(target=_hb, daemon=True, name="h2-demo-hb")
-            hb_thread.start()
             try:
                 for index, step in enumerate(route["steps"]):
                     self._set_step(index)
@@ -796,6 +800,9 @@ class DemoService:
                 client.teleop_release(state["token"])
             raise
         finally:
+            if status_client is not None:
+                with suppress(Exception):
+                    status_client.close()
             client.close()
 
     def _acquire(self, client) -> tuple[str, GatewayClock | None]:
