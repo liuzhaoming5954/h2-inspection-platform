@@ -91,28 +91,31 @@ STALL_SPEED_MPS = 0.05          # 速度着门狗阈值：窗口峰值低于此�
 STALL_SPEED_WINDOW_S = 3.0      # 速度峰值观察窗
 STARTUP_ARM_S = 2.0             # 中途看门狗的武装时延（步态起步期速度本就为零）
 
-# ---- 转向逼近（保持 IMU 闭环，2026-11-22 调参后实测很准）----
-# 转向阈值实测在 0.55 附近临界（手动按住偶尔只扭腰不迈步），取 0.7 留余量；
-# 0.7 rad/s 下反应超冲约 12–19°，提前量 8°。接受窗 2026-11-23 曾收紧到 10°，
-# 当天 8 步实测引发来回摆动（见下），先回 20°，待盲转保护验证后逐步收紧。
-CUT_EARLY_RAD = math.radians(8)
-APPROACH_PASSES = 3             # 停流-测量-反向闭环的往返次数上限
+# ---- 转向步：时间主控 + 唤醒机动（2026-11-23 夜间终版）----
+# 实测因果：二维码停靠 17 秒后，0.7rad/s 转向指令连续 9 秒只引起扭腰晃身、
+# 不迈步（估计器姿态角证实物理转角 <5°，停-重启指令三轮无效）——长静止后
+# 步态不响应转向是机器人侧固件怪癖（已列宇树问题清单）。对策与直线步同构：
+# 主段按时间模型开环（T = 角度/0.7 + 起步 0.5s，标定自当日 4 次 90° 实测
+# 2.5~3.3s），停稳后用估计器姿态角测残差做有界精修；一整段实测转角 <5°
+# 判定「只扭腰」，先用 forward 短脉冲唤醒步态（迈步与转向解耦，前进唤醒
+# 更可靠）再重试，唤醒 2 次无效干净中止。
+TURN_RATE_RADPS = 0.7           # 硬件转向模型速度，须与网关 H2_V_TURN_SLOW 一致
+SIM_TURN_RATE = 0.3             # 模拟网关替身的积分角速度（teleop 测试替身）
+TURN_STARTUP_S = 0.5            # 步态起步等效时延（时间→角度模型截距）
+TURN_TRIM_PASSES = 2            # 主段之后的精修段数上限
+TURN_TRIM_MAX_S = 3.0           # 单个精修段的时长上限
+TURN_PROGRESS_MIN_RAD = math.radians(5)   # 一段转向的最小可信转角（低于=只扭腰）
+TURN_WAKE_FORWARD_S = 0.4       # 唤醒前进脉冲时长（0.5m/s ≈ 0.2m 位移代价）
+TURN_WAKE_SETTLE_S = 0.6        # 唤醒后的停稳时间
+TURN_WAKE_MAX = 2               # 唤醒次数上限，超限中止
+YAW_TOLERANCE_RAD = math.radians(3)
+# 精修预算用尽后的兜底接受窗（步态反应超冲决定的最小可达精度）
 ACCEPT_TOLERANCE_RAD = math.radians(20)
-CRUISE_REMAINING_RAD = math.radians(10)
-STALL_YAW_RAD = math.radians(1)
-
-# ---- 转向盲转保护（2026-11-23，8 步实测来回摆动的根治项）----
-# 实测因果链：建图桥累积负载 → /pose 间歇停顿 0.1~2s → 偏航反馈 1~3s 不更新
-# → 闭环盲转，单段过转 130~148° 后反向盲转。两道保险：
-# ① 反馈新鲜度：偏航样本间隔超限立即停帧等数据（宁可停下，绝不盲转）；
-# ② 单段时长上限：同一方向的连续指令时长超过「剩余角/角速度+余量」必停
-#    重测——即使反馈完全冻结，摆幅也被钉死在一段的物理量内。
-TURN_RATE_RADPS = 0.7           # 与网关 H2_V_TURN_SLOW 一致（单段上限估算用）
-TURN_BURST_MARGIN_S = 0.8       # 单段上限余量（步态起步 + 反馈延迟）
-TURN_FEED_STALE_S = 0.6         # 偏航反馈最大允许间隔（秒）
+# 反馈新鲜度门限（测量时锁定源样本年龄超限 → 停等，绝不基于陈旧值修正）
+TURN_FEED_STALE_S = 0.6
 # 2026-11-23 12 步实测：桥的 GIL 停顿是间歇性的（阵发几秒后自愈，事后探测
 # 仅 2-11ms），等待 2s 不够——放宽到 8s，宁可多站几秒也不轻易中止演示。
-TURN_FEED_WAIT_S = 8.0          # 反馈停顿后的等待恢复时限，超时中止
+TURN_FEED_WAIT_S = 8.0
 
 # ---- 名义航向簿记（2026-11-23）----
 # 前进步实测每步漂 -3~-5°：转向步原来只闭环「相对转角」，漂移跨步累积
@@ -1030,119 +1033,114 @@ class DemoService:
             self._send_checked(client, state, "stop")
             time.sleep(SETTLE_AFTER_STEP)
 
+    def _stream_action(self, client, state: dict, action: str, seconds: float) -> None:
+        """按时长开环流式发送动作帧（时间主控的执行原语，不发不发额外停帧）。"""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._check_abort()
+            self._check_field()
+            self._send_checked(client, state, action)
+            time.sleep(FRAME_INTERVAL)
+
+    def _wait_fresh_yaw(self, client, state: dict, feed) -> None:
+        """测量前等待锁定反馈源新鲜（绝不基于陈旧样本做修正决策）。"""
+        if not self._hardware:
+            return
+        source, _, age = self._yaw_feedback(feed)
+        if source == "fl":
+            raise DemoAbort("转向反馈源不可用（网关姿态与桥 IMU 均缺失），"
+                            "转向中止等待人工")
+        if age <= TURN_FEED_STALE_S:
+            return
+        self._send_checked(client, state, "stop")
+        waited = 0.0
+        while self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S \
+                and waited < TURN_FEED_WAIT_S:
+            time.sleep(0.05)
+            waited += 0.05
+        if self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S:
+            raise DemoAbort(f"偏航反馈中断（{source} 源停顿），转向中止等待人工")
+
     def _turn(self, client, state: dict, feed, degrees: float, *,
               target_yaw: float | None = None) -> None:
-        """转向步。target_yaw 给定时闭环到该绝对航向（名义航向簿记），
-        否则按当前实测 + 增量（回正调用即此用法）。"""
-        positive = ("turn_left", "turn_left_slow") if TURN_LEFT_POSITIVE \
-            else ("turn_right", "turn_right_slow")
-        negative = ("turn_right", "turn_right_slow") if TURN_LEFT_POSITIVE \
-            else ("turn_left", "turn_left_slow")
-        # 停留步后免检期（同 _move：步态重启的里程计/IMU 冻结窗口）
-        grace_until = time.monotonic() + STALL_GRACE_S if self._last_step_was_dwell else 0
-        self._last_step_was_dwell = False
-        # 转向前校零：仅当锁定源是桥 livox 积分时需要（网关姿态角是绝对量；
-        # 校零含 1 秒采样 + 稳定等待，能省则省每步 ~1.4 秒）
+        """转向步（2026-11-23 夜间终版：时间主控 + 姿态角精修 + 唤醒机动）。
+
+        与直线步同构：主段按时间模型开环（T = 剩余角/0.7 + 起步 0.5s，标定自
+        当日 4 次 90° 实测），停稳后用锁定反馈源测残差、有界精修。一整段实测
+        转角 < 5° 判「只扭腰」——现场观察确认：长静止后站姿分开变大，原本能
+        转动身体的 0.7rad/s 此时只剩腰部扭动（步态不提交迈步），停-重启指令
+        无效；对策是前进短脉冲强制迈步、重置站姿后再试。
+        target_yaw 给定时转到该绝对航向（名义航向簿记），否则按当前+增量。
+        """
+        def action_for(delta: float) -> str:
+            """剩余角为正（需左转）时的动作名；动作速度由网关 env 决定。"""
+            if TURN_LEFT_POSITIVE:
+                return "turn_left_slow" if delta > 0 else "turn_right_slow"
+            return "turn_right_slow" if delta > 0 else "turn_left_slow"
+
+        rate = TURN_RATE_RADPS if self._hardware else SIM_TURN_RATE
+        startup = TURN_STARTUP_S if self._hardware else 0.0
+        # 校零：仅锁定源是桥 livox 积分时需要（网关姿态角是绝对量）
         if self._hardware and self._yaw_source == "imu":
             with suppress(Exception):
                 field.calibrate_imu_bias()
             time.sleep(0.2)   # 等桥的积分稳定
 
-        # 转向反馈源见 _yaw_feedback（网关姿态角优先，2026-11-23 三源实测）
-        start_yaw = self._measured_yaw(feed)
+        self._last_step_was_dwell = False
         target = target_yaw if target_yaw is not None \
-            else start_yaw + math.radians(degrees)
-        deadline = time.monotonic() + 15 + abs(math.radians(degrees)) / 0.1
-        stall_yaw = start_yaw
-        stall_at = time.monotonic()
-        passes = 0
-        cap_hits = 0               # 单段时长上限触发次数（诊断信息）
-        seg_dir = 0                # 当前段方向 +1左/-1右/0无（单段上限跟踪）
-        seg_started = 0.0
-        seg_span = 0.0             # 段开始时的剩余角
+            else self._measured_yaw(feed) + math.radians(degrees)
+        wakes = 0
+        rounds = 0
         while True:
             self._check_abort()
             self._check_field()
             feed.poll()
-            tracker = feed.tracker
-            if feed.fail >= POSE_FAIL_LIMIT:
-                raise DemoAbort("位姿丢失（反馈与速度数据同时中断）")
-            source, turn_yaw, yaw_age = self._yaw_feedback(feed)
-            if self._hardware and source == "fl":
-                # 硬件转向不允许停在 FastLIO 扫描 yaw 档：网关姿态与桥 IMU
-                # 均缺失说明反馈链路断了，快转时扫描 yaw 不可信（2026-11-20
-                # 三源实测），立即中止等待人工。
-                raise DemoAbort("转向反馈源不可用（网关姿态与桥 IMU 均缺失），"
-                                "转向中止等待人工")
-            # 盲转保险①（仅硬件）：当前生效源的样本年龄超限 → 立即停帧等数据。
-            # 2026-11-23 实测：桥负载曾令反馈间歇停顿 0.1~2s，闭环盲转导致
-            # 单段过转 130~148° 来回摆——宁可停下，绝不盲转。
-            if self._hardware and yaw_age > TURN_FEED_STALE_S:
-                self._send_checked(client, state, "stop")
-                # 等锁定源恢复（不是任意采样成功——源不换，基线才一致）
-                waited = 0.0
-                while self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S \
-                        and waited < TURN_FEED_WAIT_S:
-                    time.sleep(0.05)
-                    waited += 0.05
-                if self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S:
-                    raise DemoAbort(f"偏航反馈中断（{source} 源停顿），转向中止等待人工")
-                continue   # 数据恢复后重新评估剩余角
-            if turn_yaw is None:
-                turn_yaw = 0.0
-            remaining = target - turn_yaw
+            self._wait_fresh_yaw(client, state, feed)
+            _, yaw_now, _ = self._yaw_feedback(feed)
+            remaining = target - (yaw_now if yaw_now is not None else 0.0)
             if abs(remaining) <= YAW_TOLERANCE_RAD:
-                break
-            if time.monotonic() > deadline:
-                raise DemoAbort(f"转向 {degrees:.0f}° 步超时")
-            if abs(turn_yaw - stall_yaw) >= STALL_YAW_RAD:
-                stall_yaw, stall_at = turn_yaw, time.monotonic()
-            elif time.monotonic() < grace_until:
-                stall_at = time.monotonic()   # 免检期
-            elif (tracker.speed_peak(STALL_SPEED_WINDOW_S) or 0) >= STALL_SPEED_MPS:
-                # IMU 偏航不涨但机体系速度非零：机器人在动（重心转移/原地踏步），继续等
-                stall_at = time.monotonic()
-            elif time.monotonic() - stall_at > STALL_SECONDS:
-                raise DemoAbort("指令持续发送而偏航不涨：角速度低于行走阈值，"
-                                "请上调网关 H2_V_TURN_SLOW 环境变量后重试")
-            if not self._hardware:
-                action = (positive[0] if remaining > 0 else negative[0]) if abs(remaining) > CRUISE_REMAINING_RAD \
-                    else (positive[1] if remaining > 0 else negative[1])
-                self._send_checked(client, state, action)
-                time.sleep(FRAME_INTERVAL)
-            elif abs(remaining) > CUT_EARLY_RAD:
-                # 盲转保险②：单段时长上限——同一方向连续指令的时长超过
-                # 「剩余角/角速度+余量」必停重测。反馈即使完全冻结，
-                # 摆幅也被钉死在单段物理量内（约 10° 级）。
-                direction = 1 if remaining > 0 else -1
-                now = time.monotonic()
-                if direction != seg_dir:
-                    seg_dir, seg_started, seg_span = direction, now, abs(remaining)
-                elif now - seg_started > seg_span / TURN_RATE_RADPS + TURN_BURST_MARGIN_S:
-                    # 单段超时：先查纠偏预算（remaining > CUT_EARLY 时永远走不到
-                    # 下方常规的 passes 检查，必须在这里收口，否则冻结反馈下无限循环）
-                    if passes >= APPROACH_PASSES:
-                        raise DemoAbort(f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°，"
-                                        f"单段超时 {cap_hits + 1} 次：偏航反馈疑似停顿）")
-                    cap_hits += 1
-                    passes += 1
-                    seg_dir = 0
-                    self._send_checked(client, state, "stop")
-                    time.sleep(SETTLE_AFTER_BURST)
-                    continue
-                self._send_checked(client, state, positive[1] if remaining > 0 else negative[1])
-                time.sleep(FRAME_INTERVAL)
-            elif abs(remaining) <= ACCEPT_TOLERANCE_RAD:
-                break
-            elif passes < APPROACH_PASSES:
-                passes += 1
+                break                       # 达标
+            if abs(remaining) <= ACCEPT_TOLERANCE_RAD:
+                break                       # 精修预算内的兜底接受窗
+            rounds += 1
+            if rounds > TURN_WAKE_MAX + 1:
+                raise DemoAbort(f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°，"
+                                f"含 {wakes} 次唤醒重试）：中止等待人工")
+            # —— 主段：时间主控开环 ——
+            before_yaw = yaw_now
+            self._stream_action(client, state, action_for(remaining),
+                                abs(remaining) / rate + startup)
+            self._send_checked(client, state, "stop")
+            time.sleep(SETTLE_AFTER_STEP)
+            feed.poll()
+            self._wait_fresh_yaw(client, state, feed)
+            _, after_yaw, _ = self._yaw_feedback(feed)
+            turned = abs(math.remainder((after_yaw or 0.0) - (before_yaw or 0.0),
+                                        2 * math.pi))
+            if turned < TURN_PROGRESS_MIN_RAD:
+                # 只扭腰：前进脉冲强制迈步重置站姿（2026-11-23 夜间现场结论：
+                # 宽站姿下转向指令只剩腰部动作，停-重启无效，必须迈步唤醒）
+                if wakes >= TURN_WAKE_MAX:
+                    raise DemoAbort("转向只扭腰未迈步（步态不响应转向指令，"
+                                    "站姿过宽或固件异常），中止等待人工")
+                wakes += 1
+                self._stream_action(client, state, "forward", TURN_WAKE_FORWARD_S)
                 self._send_checked(client, state, "stop")
-                time.sleep(SETTLE_AFTER_BURST)
-            else:
-                detail = f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°"
-                if cap_hits:
-                    detail += f"，单段超时 {cap_hits} 次：偏航反馈疑似停顿"
-                raise DemoAbort(detail + "）")
+                time.sleep(TURN_WAKE_SETTLE_S)
+                continue
+            # —— 精修段：本段有真实转动，按残差有界补转 ——
+            for _ in range(TURN_TRIM_PASSES):
+                feed.poll()
+                self._wait_fresh_yaw(client, state, feed)
+                _, yaw_trim, _ = self._yaw_feedback(feed)
+                err = target - (yaw_trim if yaw_trim is not None else 0.0)
+                if abs(err) <= YAW_TOLERANCE_RAD or abs(err) > ACCEPT_TOLERANCE_RAD:
+                    break                   # 达标；异常大残差不追（防反馈异常牵引）
+                self._stream_action(client, state, action_for(err),
+                                    min(abs(err) / rate + startup * 0.5, TURN_TRIM_MAX_S))
+                self._send_checked(client, state, "stop")
+                time.sleep(SETTLE_AFTER_STEP)
+            # 回外层重评：达标/兜底窗则退出，否则再一轮（可能再唤醒）
         self._send_checked(client, state, "stop")
         time.sleep(SETTLE_AFTER_STEP)
 
