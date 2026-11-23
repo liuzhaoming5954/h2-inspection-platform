@@ -55,7 +55,11 @@ class SimulatedTeleop:
         return teleop_reply(True, "acquired", "simulated teleop control acquired", self.token)
 
     def pose(self) -> dict[str, float]:
-        return {"x": self.x, "y": self.y, "yaw": self.yaw}
+        # speed：按当前动作给出机体系速度模长（转向只改变朝向，线速度为 0），
+        # 与真机 Pose.speed 对齐，执行器的停滞判断两种模式同一套逻辑。
+        linear = LINEAR_SPEEDS.get(self.motion, 0.0)
+        return {"x": self.x, "y": self.y, "yaw": self.yaw,
+                "speed": abs(linear)}
 
     def inspection_position(self, x: float, y: float) -> None:
         if (x, y) != (self.x, self.y):

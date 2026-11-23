@@ -51,7 +51,13 @@ class GatewayClient:
                 "task_id": state.task_id, "progress": state.progress,
                 "sequence": state.sequence,
                 "battery_percent": state.battery_percent if state.HasField("battery_percent") else None,
-                "pose": {"x": state.pose.x, "y": state.pose.y, "yaw": state.pose.yaw} if state.HasField("pose") else None,
+                "pose": ({"x": state.pose.x, "y": state.pose.y, "yaw": state.pose.yaw,
+                          # 机体系速度模长（可选字段，旧网关缺省不带）：
+                          # 位置不被这台固件的估计器积分，执行器停滞检测靠它
+                          "speed": state.pose.speed}
+                         if state.HasField("pose") and state.pose.HasField("speed")
+                         else ({"x": state.pose.x, "y": state.pose.y, "yaw": state.pose.yaw}
+                               if state.HasField("pose") else None)),
                 "simulated": state.simulated,
                 "start_count": state.start_count, "task_status": state.task_status,
                 "updated_at": state.updated_at, "teleop_active": state.teleop_active,

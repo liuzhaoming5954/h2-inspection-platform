@@ -51,6 +51,10 @@ message Pose {
   double y = 2;
   // 模拟平面上的角度以弧度表示，沿 +x 为零，朝 +y 转动为正。
   double yaw = 3;
+  // 机体系速度模长（m/s），真机来自 DDS 里程计 velocity 字段。位置不被这台
+  // 固件的估计器积分（2026-11-22 实测），但速度字段有读数，演示执行器用它
+  // 判断「指令在发而机器人没在走」的停滞。模拟网关与旧网关缺省为 0。
+  optional double speed = 4;
 }
 
 message RobotState {

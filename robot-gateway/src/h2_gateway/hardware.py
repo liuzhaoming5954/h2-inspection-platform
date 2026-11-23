@@ -198,6 +198,9 @@ class OdomWatcher:
                 "x": float(message.position[0]),
                 "y": float(message.position[1]),
                 "yaw": float(message.imu_state.rpy[2]),
+                # 机体系速度模长：位置不被这台固件的估计器积分（2026-11-22
+                # 实测），但速度字段是活的，供执行器做运动停滞判断。
+                "speed": float(math.hypot(message.velocity[0], message.velocity[1])),
             })
 
     def pose(self) -> dict | None:

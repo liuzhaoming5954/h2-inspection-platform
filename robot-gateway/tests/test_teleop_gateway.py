@@ -27,7 +27,8 @@ def test_heartbeat_renews_lease_but_cannot_extend_direction():
     assert controller.command(token, 2, "heartbeat", 350, 100.2)["code"] == "renewed"
     assert controller.lease_deadline == pytest.approx(102.2)
     controller.advance(101)
-    assert controller.pose() == pytest.approx({"x": LINEAR_SPEED * MAX_MOTION_SECONDS, "y": 0, "yaw": 0})
+    assert controller.pose() == pytest.approx({"x": LINEAR_SPEED * MAX_MOTION_SECONDS, "y": 0,
+                                                "yaw": 0, "speed": 0.0})   # 帧过期已停步，speed 归零
     assert controller.motion == "stop"
     assert not controller.token
 
