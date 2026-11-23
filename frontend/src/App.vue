@@ -683,12 +683,14 @@ onBeforeUnmount(() => {
    行随视口高度伸缩（min-content 下限保证最小可读尺寸）。 */
 .hardware-workspace {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(280px, 320px);
-  grid-template-rows: minmax(min-content, 1fr);
+  /* 行下限必须为 0：若用 min-content，转写内容会把整行（连同地图/图像面板）持续撑高。 */
+  grid-template-rows: minmax(0, 1fr);
   grid-template-areas: 'map image asr';
   gap: 12px;
   margin-bottom: 12px;
-  /* 76px ≈ 页首留白 12 + 状态带 38 与下边距 14、工作区下边距 12，工作区恰好填满 820 高的视口。 */
-  min-height: calc(100vh - 76px);
+  /* 76px ≈ 页首留白 12 + 状态带 38 与下边距 14、工作区下边距 12。高度定死为一屏，
+     转写超出后在 .asr-log 内部滚动，页面保持无滚动。 */
+  height: calc(100vh - 76px);
 }
 .hardware-map { grid-area: map; }
 .hardware-image { grid-area: image; }
@@ -707,7 +709,8 @@ onBeforeUnmount(() => {
 .asr-log time { color: #93a7b4; font-size: 11px; margin-right: 10px; font-variant-numeric: tabular-nums; }
 .asr-empty { color: #93a7b4; }
 @media (max-width: 800px) {
-  .hardware-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; grid-template-areas: 'map' 'image' 'asr' 'demo'; }
+  /* 窄屏堆叠布局恢复自然高度，不锁一屏。 */
+  .hardware-workspace { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'map' 'image' 'asr'; height: auto; }
 }
 .hardware-sidebar .brand { padding: 0 4px 8px; font-size: 16px; letter-spacing: .4px; }
 .sidebar-teleop { flex-shrink: 0; margin: 10px -6px 0; border-radius: 8px; }
