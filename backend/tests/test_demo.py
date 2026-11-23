@@ -441,13 +441,19 @@ def test_demo_mapping_valve_closed_aborts(settings, gateway, monkeypatch,
         assert "雷达数据接入被关闭" in state["detail"]
 
 
-def test_demo_hardware_turn_uses_imu_feedback(settings, gateway, monkeypatch,
-                                              motion_gateway, fast_timing, field_stub):
-    """转向闭环走 IMU 陀螺积分（桥提供 imu_yaw 时），扫描 yaw 不参与判定。"""
+def test_demo_hardware_turn_uses_gateway_yaw_feedback(settings, gateway, monkeypatch,
+                                                       motion_gateway, fast_timing, field_stub):
+    """转向闭环首选网关姿态角（gRPC Pose.yaw，2026-11-23 三源实测结论）。
+
+    桥的 IMU 字段即使存在也不参与（本测试的 fastlio_pose 桩无 imu 字段），
+    网关替身的 yaw 积分即反馈源，闭环收敛到 ±6°。"""
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
+    monkeypatch.setattr(field, "fastlio_pose",
+                        lambda timeout=1.0: {"x": motion_gateway.x, "y": 0.0, "z": 0.0,
+                                             "yaw": motion_gateway.yaw, "age_ms": 10})
     with TestClient(application) as client:
-        body = {"name": "IMU转向", "steps": [{"type": "turn", "value": 90}]}
+        body = {"name": "网关姿态转向", "steps": [{"type": "turn", "value": 90}]}
         route_id = client.post("/api/demo/routes", json=body).json()["id"]
         client.post(f"/api/demo/routes/{route_id}/run")
         state = wait_phase(client, "done")
@@ -456,20 +462,21 @@ def test_demo_hardware_turn_uses_imu_feedback(settings, gateway, monkeypatch,
         assert "turn_left_slow" in motion_gateway.actions
 
 
-def test_demo_hardware_turn_requires_fresh_imu(settings, gateway, monkeypatch,
-                                                motion_gateway, fast_timing, field_stub):
-    """转向闭环强制要求有效 IMU：桥未提供/停更时中止而非回退扫描 yaw。"""
+def test_demo_hardware_turn_requires_yaw_feedback(settings, gateway, monkeypatch,
+                                                  motion_gateway, fast_timing, field_stub):
+    """网关姿态与桥 IMU 均缺失时中止（不回退到快转不可信的扫描 yaw）。"""
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
+    motion_gateway.pose_available = False    # 网关姿态缺失（速度一并缺失）
     monkeypatch.setattr(field, "fastlio_pose",
                         lambda timeout=1.0: {"x": motion_gateway.x, "y": 0.0, "z": 0.0,
                                              "yaw": motion_gateway.yaw, "age_ms": 10})
     with TestClient(application) as client:
-        body = {"name": "无IMU转向", "steps": [{"type": "turn", "value": 90}]}
+        body = {"name": "无反馈转向", "steps": [{"type": "turn", "value": 90}]}
         route_id = client.post("/api/demo/routes", json=body).json()["id"]
         client.post(f"/api/demo/routes/{route_id}/run")
         state = wait_phase(client, "aborted")
-        assert "IMU 数据无效" in state["detail"]
+        assert "转向反馈源不可用" in state["detail"]
 
 
 def test_turn_burst_cap_aborts_on_frozen_yaw(settings, gateway, monkeypatch,
@@ -478,10 +485,11 @@ def test_turn_burst_cap_aborts_on_frozen_yaw(settings, gateway, monkeypatch,
     单段时长上限逐段刹车，passes 耗尽后带诊断中止——绝不无限盲转。"""
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
-    # 位姿恒为 0：样本新鲜（since_ok 正常）但偏航永不更新
+    # 反馈源是网关姿态角：让替身收到转向帧也不旋转（yaw 数值冻结，
+    # 样本照常新鲜），闭环必须靠单段上限刹车
+    motion_gateway.turn_speed = 0.0
     monkeypatch.setattr(field, "fastlio_pose", lambda timeout=1.0: {
-        "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": 10,
-        "imu_yaw": 0.0, "imu_valid": True, "imu_age_ms": 40})
+        "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": 10})
     monkeypatch.setattr(demo_module, "TURN_RATE_RADPS", 50.0)      # 单段上限≈0.83s
     monkeypatch.setattr(demo_module, "TURN_BURST_MARGIN_S", 0.05)
 
