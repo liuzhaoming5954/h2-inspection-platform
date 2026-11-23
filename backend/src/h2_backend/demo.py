@@ -175,10 +175,15 @@ class _PoseTracker:
         self._last_gw: float | None = None
         self.gw_at = 0.0             # 最近一次网关姿态样本的单调钟（盲转保护用）
         self._speed_hist: deque[tuple[float, float]] = deque(maxlen=200)
+        self._lock = threading.Lock()   # 双通道线程并发更新（gw 快线 + fl 慢线）
 
     def update(self, x: float | None, y: float | None, yaw: float | None,
                imu_yaw: float | None = None, speed: float | None = None,
                gw_yaw: float | None = None) -> None:
+        with self._lock:
+            self._update_locked(x, y, yaw, imu_yaw, speed, gw_yaw)
+
+    def _update_locked(self, x, y, yaw, imu_yaw, speed, gw_yaw) -> None:
         if x is not None and y is not None and yaw is not None:
             if self._last_fl is not None:
                 delta = math.hypot(x - self._last_fl[0], y - self._last_fl[1])
@@ -230,20 +235,27 @@ class _PoseTracker:
 
 
 class _PoseFeed(threading.Thread):
-    """硬件模式的后台位姿线程：10Hz 拉取并累计路程/偏航。
+    """硬件模式的后台采样线程，双通道各起一个实例、共用一个 tracker：
 
-    建图桥的 /pose 偶发被点云累计阻塞数百毫秒（见 h2_map_bridge 拆锁注释），
-    运动循环若同步拉取，指令流会断到帧过期，步态控制器随之重置不迈步。
-    线程内单写 tracker，运动线程只读最新累计量。
+    - 网关快线（10Hz）：GetState 的速度 + 估计器姿态角，gRPC 数毫秒应答，
+      转向闭环与停滞检测的生命线，绝不能被慢源拖累；
+    - 建图桥慢线（~2Hz）：FastLIO 位置/扫描 yaw/桥 IMU，/pose 会被点云
+      累积阻塞数百毫秒（见 h2_map_bridge 拆锁注释），只服务精修与兜底。
+    2026-11-23 夜间教训：两源曾串在一个采样周期里，桥超时把网关姿态样本
+    间隔拖到 0.9s（超过盲转保护的新鲜度门限），转向被反复刹停直到单段
+    超时——拆线后桥卡顿不再影响快线的采样节奏。
+    线程内写 tracker（内部有锁），运动线程只读最新累计量。
     """
 
-    def __init__(self, source):
-        super().__init__(daemon=True, name="h2-demo-pose")
+    def __init__(self, source, interval: float = 0.1, name: str = "h2-demo-pose",
+                 tracker: "_PoseTracker | None" = None):
+        super().__init__(daemon=True, name=name)
         self._source = source
-        self.tracker = _PoseTracker()
+        self._interval = interval
+        self.tracker = tracker if tracker is not None else _PoseTracker()
         self.fail = 0
-        self.imu_ok = False      # 最近一次样本是否携带有效 IMU（转向步强制要求）
-        self.last_ok_at = 0.0    # 最近一次成功采样的单调钟（盲转保护用）
+        self.imu_ok = False      # 最近一次样本是否携带有效 IMU（降级源判定用）
+        self.last_ok_at = 0.0    # 最近一次成功采样的单调钟
         self._halt = threading.Event()
 
     def run(self) -> None:
@@ -256,7 +268,7 @@ class _PoseFeed(threading.Thread):
                 self.imu_ok = pose[3] is not None
                 self.last_ok_at = time.monotonic()
                 self.tracker.update(*pose)
-            self._halt.wait(0.1)
+            self._halt.wait(self._interval)
 
     def since_ok(self) -> float:
         """距最近一次成功采样的秒数；从未成功过返回大值。"""
@@ -319,6 +331,7 @@ class DemoService:
         self._motion_started = False           # 只在真正发出过运动帧后播报中断
         self._last_step_was_dwell = False       # 上一步是否为停留步（免检期判定）
         self._nominal_yaw: float | None = None  # 名义航向（路线起点锚定，见常数区注释）
+        self._yaw_source: str = "gw"           # 偏航反馈源（路线级锁定，见 _yaw_feedback）
         self._abort = threading.Event()
         self._worker: threading.Thread | None = None
 
@@ -706,10 +719,34 @@ class DemoService:
             self._set_phase("running", "申请运动控制权…")
             state["token"], state["clock"] = self._acquire(client)
             if self._hardware:
-                feed = _PoseFeed(lambda: self._pose(client))
+                # 双通道（见 _PoseFeed 类注释）：网关快线是转向反馈与停滞
+                # 检测的生命线；FastLIO 慢线只服务精修与兜底
+                feed = _PoseFeed(lambda: self._pose_gateway(client), interval=0.1,
+                                 name="h2-demo-pose-gw")
                 feed.start()
+                fl_feed = _PoseFeed(lambda: self._pose_fastlio(), interval=0.4,
+                                    name="h2-demo-pose-fl", tracker=feed.tracker)
+                fl_feed.start()
             else:
                 feed = _SyncPoseFeed(client, self)
+                fl_feed = None
+            # 反馈源锁定（2026-11-23 夜间教训，见 _yaw_feedback 注释）：
+            # 等最多 2 秒让网关姿态出现（首选源），没有则锁桥 livox；
+            # 两者皆无时硬件模式直接中止。锁定后整条路线不再换源。
+            if self._hardware:
+                lock_deadline = time.monotonic() + 2.0
+                while feed.tracker.gw_yaw is None and time.monotonic() < lock_deadline:
+                    time.sleep(0.1)
+                    feed.poll()
+                if feed.tracker.gw_yaw is not None:
+                    self._yaw_source = "gw"
+                elif feed.tracker.imu_yaw is not None:
+                    self._yaw_source = "imu"
+                else:
+                    raise DemoAbort("转向反馈源不可用（网关姿态与桥 IMU 均缺失），"
+                                    "中止等待人工")
+            else:
+                self._yaw_source = "gw"   # 模拟：网关位姿即姿态角
             # 名义航向锚定：路线起点把当前实测航向定为基准（2026-11-23）
             feed.poll()
             self._nominal_yaw = self._measured_yaw(feed)
@@ -745,6 +782,8 @@ class DemoService:
                 halt_hb.set()
                 hb_thread.join(timeout=1.0)
                 feed.close()
+                if fl_feed is not None:
+                    fl_feed.close()
             self._send_checked(client, state, "stop")
             reply = client.teleop_release(state["token"])
             if not reply.get("accepted"):
@@ -785,37 +824,41 @@ class DemoService:
             raise DemoAbort(f"未获得运动控制权：{code}")
         return reply["token"], GatewayClock.from_reply(reply)
 
-    def _pose(self, client):
-        """位姿采样，返回 (x, y, yaw, imu_yaw, speed, gw_yaw)。
+    def _pose_gateway(self, client):
+        """快线采样：网关 GetState 的速度 + 估计器姿态角（毫秒级，10Hz）。
 
-        硬件模式：x/y/yaw 来自 FastLIO（不可用时为 None——速度仍然返回，
-        时间主控的直线步降级继续）；imu_yaw 来自桥的陀螺积分（停更时 None）；
-        speed 与 gw_yaw 来自网关 GetState（DDS 速度模长 + 估计器姿态角——
-        位置不被本机估计器积分，但姿态角经 2026-11-23 三源实测转角跟踪优良，
-        作为转向反馈首选源，见 _yaw_feedback）。
-        模拟模式：位姿即网关积分结果，gw_yaw 同源。
-        全部来源缺失才返回 None（计一次位姿失败）。
+        速度与姿态角都来自 DDS（速度模长 + rpy[2]），不依赖建图桥；
+        两者都缺失（网关状态不可达/姿态过期）才计一次失败。
         """
-        if self._hardware:
-            payload = field.fastlio_pose(timeout=0.8)
-            try:
-                gateway_pose = client.get_state().get("pose") or {}
-                speed = float(gateway_pose["speed"]) if "speed" in gateway_pose else None
-                gw_yaw = float(gateway_pose["yaw"]) if "yaw" in gateway_pose else None
-            except Exception:  # noqa: BLE001 - 网关缺失不影响 FastLIO 路径
-                speed = gw_yaw = None
-            if payload is None:
-                if speed is None and gw_yaw is None:
-                    return None
-                return (None, None, None, None, speed, gw_yaw)
-            # IMU 只在「有样本且未停更」时提供：初始 0 或停更的积分不能当转角
-            imu = payload.get("imu_yaw")
-            imu_fresh = (payload.get("imu_valid") is True
-                         and isinstance(payload.get("imu_age_ms"), (int, float))
-                         and payload["imu_age_ms"] <= IMU_STALE_MS)
-            return (float(payload["x"]), float(payload["y"]), float(payload["yaw"]),
-                    float(imu) if imu_fresh and isinstance(imu, (int, float)) else None,
-                    speed, gw_yaw)
+        try:
+            pose = client.get_state().get("pose") or {}
+        except Exception:  # noqa: BLE001 - gRPC 偶发超时按失败计
+            return None
+        speed = float(pose["speed"]) if "speed" in pose else None
+        gw_yaw = float(pose["yaw"]) if "yaw" in pose else None
+        if speed is None and gw_yaw is None:
+            return None
+        return (None, None, None, None, speed, gw_yaw)
+
+    def _pose_fastlio(self):
+        """慢线采样：FastLIO 位置/扫描 yaw/桥 IMU 积分（精修与兜底用）。
+
+        桥不可用时返回 None（只影响精修与降级源，不拖累快线）。
+        """
+        payload = field.fastlio_pose(timeout=0.8)
+        if payload is None:
+            return None
+        # IMU 只在「有样本且未停更」时提供：初始 0 或停更的积分不能当转角
+        imu = payload.get("imu_yaw")
+        imu_fresh = (payload.get("imu_valid") is True
+                     and isinstance(payload.get("imu_age_ms"), (int, float))
+                     and payload["imu_age_ms"] <= IMU_STALE_MS)
+        return (float(payload["x"]), float(payload["y"]), float(payload["yaw"]),
+                float(imu) if imu_fresh and isinstance(imu, (int, float)) else None,
+                None, None)
+
+    def _pose(self, client):
+        """模拟模式的同步位姿采样，返回 (x, y, yaw, imu_yaw, speed, gw_yaw)。"""
         state = client.get_state()
         pose = state.get("pose")
         if not pose:
@@ -869,23 +912,23 @@ class DemoService:
         if self._hardware and not field.DATA_VALVES.get("mapping", True):
             raise DemoAbort("雷达数据接入被关闭，位姿来源中断")
 
-    @staticmethod
-    def _yaw_feedback(feed) -> tuple[str, float | None, float]:
-        """转向/回正的偏航反馈源选择（2026-11-23 三源实测后的优先级）。
+    def _yaw_feedback(self, feed) -> tuple[str, float | None, float]:
+        """转向/回正的偏航反馈读取（源在路线级锁定，见 _run_sequence）。
 
-        ① 网关 Pose.yaw：DDS 估计器姿态角，gRPC 通道直达、绝对量无需校零、
-           不经过建图桥（桥停顿与转向闭环解耦）。实测转 90° 与 FastLIO 差
-           <5°，两遍往返净漂移 +6.5°，优于桥 livox 积分的 -44.7°。
-        ② 桥 livox IMU 积分：旧基准，静态漂移 -11°/min，需预转校零。
-        ③ FastLIO 扫描 yaw：快转滞后，仅兜底（硬件转向不允许停在此档）。
+        2026-11-23 夜间实测教训：逐样本选源会在网关姿态偶发缺席（执行器
+        gRPC 0.75s 超时）时静默跳到桥 livox——两源基线差几十度（livox 未
+        校零、漂移 -11°/min），闭环追着跳变的值走，转向碎段摆动后中止。
+        因此源一经锁定不再更换：锁定源停更走盲转保护，绝不静默换源。
         返回 (源名, 左正偏航或 None, 该源样本年龄秒)。
         """
         tracker = feed.tracker
-        if tracker.gw_yaw is not None:
+        if self._yaw_source == "gw":
             return "gw", tracker.gw_yaw, tracker.gw_age()
-        if tracker.imu_yaw is not None:
-            return "imu", IMU_YAW_SIGN * tracker.imu_yaw, feed.since_ok()
-        return "fl", (tracker.yaw if tracker.yaw else 0.0), feed.since_ok()
+        if self._yaw_source == "imu":
+            yaw = IMU_YAW_SIGN * tracker.imu_yaw if tracker.imu_yaw is not None else None
+            return "imu", yaw, feed.since_ok() if yaw is not None else 1e9
+        # 兜底源（FastLIO 扫描 yaw）：值在 tracker.yaw，随 fl 样本更新
+        return self._yaw_source, (tracker.yaw if tracker.yaw else 0.0), feed.since_ok()
 
     def _measured_yaw(self, feed) -> float:
         """当前实测航向（左正约定），与 _yaw_feedback 同优先级。"""
@@ -991,9 +1034,9 @@ class DemoService:
         # 停留步后免检期（同 _move：步态重启的里程计/IMU 冻结窗口）
         grace_until = time.monotonic() + STALL_GRACE_S if self._last_step_was_dwell else 0
         self._last_step_was_dwell = False
-        # 转向前校零：仅当反馈源是桥 livox 积分时需要（网关姿态角是绝对量；
+        # 转向前校零：仅当锁定源是桥 livox 积分时需要（网关姿态角是绝对量；
         # 校零含 1 秒采样 + 稳定等待，能省则省每步 ~1.4 秒）
-        if self._hardware and feed.tracker.gw_yaw is None:
+        if self._hardware and self._yaw_source == "imu":
             with suppress(Exception):
                 field.calibrate_imu_bias()
             time.sleep(0.2)   # 等桥的积分稳定
@@ -1029,12 +1072,13 @@ class DemoService:
             # 单段过转 130~148° 来回摆——宁可停下，绝不盲转。
             if self._hardware and yaw_age > TURN_FEED_STALE_S:
                 self._send_checked(client, state, "stop")
+                # 等锁定源恢复（不是任意采样成功——源不换，基线才一致）
                 waited = 0.0
-                while feed.since_ok() > TURN_FEED_STALE_S and waited < TURN_FEED_WAIT_S:
+                while self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S \
+                        and waited < TURN_FEED_WAIT_S:
                     time.sleep(0.05)
                     waited += 0.05
-                _, turn_yaw2, yaw_age2 = self._yaw_feedback(feed)
-                if yaw_age2 > TURN_FEED_STALE_S:
+                if self._yaw_feedback(feed)[2] > TURN_FEED_STALE_S:
                     raise DemoAbort(f"偏航反馈中断（{source} 源停顿），转向中止等待人工")
                 continue   # 数据恢复后重新评估剩余角
             if turn_yaw is None:
