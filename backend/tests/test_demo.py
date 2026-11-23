@@ -38,10 +38,10 @@ def fast_timing(monkeypatch):
     # 时间主控模型速度/角速度与替身网关积分参数对齐（0.2 m/s、0.3 rad/s），
     # 主段即精确到位；停留与唤醒的等待压缩到测试节奏。
     monkeypatch.setattr(demo_module, "SIM_WALK_SPEED_MPS", 0.2)
-    monkeypatch.setattr(demo_module, "SIM_TURN_RATE", 0.3)
+    monkeypatch.setattr(demo_module, "CUT_EARLY_RAD", math.radians(2))
+    monkeypatch.setattr(demo_module, "ACCEPT_TOLERANCE_RAD", math.radians(6))
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_STEP", 0.02)
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_BURST", 0.02)
-    monkeypatch.setattr(demo_module, "TURN_WAKE_SETTLE_S", 0.02)
     monkeypatch.setattr(demo_module, "HEARTBEAT_INTERVAL", 0.02)
 
 
@@ -479,29 +479,24 @@ def test_demo_hardware_turn_requires_yaw_feedback(settings, gateway, monkeypatch
         assert "转向反馈源不可用" in state["detail"]
 
 
-def test_turn_wakes_then_aborts_on_frozen_yaw(settings, gateway, monkeypatch,
-                                              motion_gateway, fast_timing, field_stub):
-    """冻结反馈/只扭腰（2026-11-23 夜间终版）：反馈数值冻结（样本新鲜但不
-    更新，等同只扭腰）时，前进唤醒最多 2 次后带诊断干净中止——绝不无限
-    重试，转向帧总量有界。"""
+def test_turn_burst_cap_aborts_on_frozen_yaw(settings, gateway, monkeypatch,
+                                             motion_gateway, fast_timing, field_stub):
+    """盲转保险②（728d7ef 行为恢复版）：反馈数值冻结（样本新鲜但不更新）
+    时，单段时长上限逐段刹车，passes 耗尽后带诊断中止——绝不无限盲转。"""
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
-    # 网关姿态角冻结：替身收到转向帧也不旋转（turn_speed=0）
-    motion_gateway.turn_speed = 0.0
-    monkeypatch.setattr(demo_module, "TURN_RATE_RADPS", 50.0)   # 主段时长≈瞬时
+    # livox 源冻结：桥桩的 imu_yaw 恒为 0（样本新鲜、数值不动）
     monkeypatch.setattr(field, "fastlio_pose", lambda timeout=1.0: {
-        "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": 10})
+        "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": 10,
+        "imu_yaw": 0.0, "imu_valid": True, "imu_age_ms": 40})
+    monkeypatch.setattr(demo_module, "TURN_RATE_RADPS", 50.0)   # 单段上限≈瞬时
 
     with TestClient(application) as client:
         body = {"name": "冻结反馈", "steps": [{"type": "turn", "value": 90}]}
         route_id = client.post("/api/demo/routes", json=body).json()["id"]
         client.post(f"/api/demo/routes/{route_id}/run")
         state = wait_phase(client, "aborted", timeout=30)
-        assert "只扭腰" in state["detail"] or "未收敛" in state["detail"]
-        # 有界性：3 轮主段 + 2 次唤醒脉冲（0.4s/0.02s=20 帧/次）
-        turn_frames = sum(1 for a in motion_gateway.actions if a.startswith("turn"))
-        wake_frames = sum(1 for a in motion_gateway.actions if a == "forward")
-        assert turn_frames < 200 and wake_frames <= 40
+        assert "单段超时" in state["detail"]
 
 
 def test_demo_two_stage_prepare_then_start(settings, gateway, monkeypatch,
