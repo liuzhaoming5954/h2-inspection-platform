@@ -62,3 +62,17 @@ docker exec -d ros-noetic-dev bash -c \
 - `libmetis-gtsam.so` 找不到 → 容器内 `ldconfig`（新版镜像已在安装后执行）
 - 编译报缺 `CustomMsg.h`/`SaveMap.h` → 未按三段顺序，直接跑 `/opt/build_ws.sh`
 - 地图停在关键帧不累计 → 用的是旧版桥；确认 `/workspace/h2_extra/h2_map_bridge.py` 为 v2
+
+## 已知负载问题与运维（2026-11-23）
+
+桥的世界系点云累积是纯 Python 长循环，**行走建图时增长极快**（实测 23 分钟
+440MB/60% CPU；静止累积慢得多）。高负载下 `/pose` 出现秒级阵发停顿，曾导致
+演示执行器转向闭环盲转（详见上位机 H2_DESIGN.md 盲转保护段）。现行缓解：
+
+- 桥启动时 `sys.setswitchinterval(0.001)`（GIL 快切换，让 HTTP 应答线程
+  能插进累积循环间隙）
+- **跑演示/路线前重启建图栈**（标准动作）：`docker restart ros-noetic-dev`
+  后按上文「运行」两连发重拉 roslaunch 与桥；容器内的旧桥是 root 进程，
+  宿主机 `pkill` 杀不掉、容器里没有 pkill——重启容器是唯一可靠途径
+- 跑路线时收起控制台地图面板（`/map` 大 JSON 是 `/pose` 的抢跑者）
+- 根治方向：转向反馈切换到网关侧 DDS IMU（进行中）、点云累积让出主线程

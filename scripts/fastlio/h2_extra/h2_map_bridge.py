@@ -17,6 +17,7 @@ HTTP 接口（容器为 host 网络，即 PC3:8097），全部带 CORS 头：
 from __future__ import annotations
 
 import json
+import sys
 import math
 import threading
 import time
@@ -251,6 +252,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    # GIL 快切换（2026-11-23）：点云累计线程是纯 Python 长循环，默认 5ms 的
+    # 线程切换周期下 HTTP 应答线程在行走建图的插入爆发期抢不到执行权，
+    # /pose 出现秒级阵发停顿（12 步实测因此触发执行器盲转保护）。把切换
+    # 周期压到 1ms，让 /pose 的处理与网络写有机会插进累积循环的间隙。
+    sys.setswitchinterval(0.001)
     rospy.init_node("h2_map_bridge", anonymous=True)
     rospy.Subscriber("/body_cloud", PointCloud2, on_body_cloud,
                      queue_size=1, buff_size=1 << 24)
