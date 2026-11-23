@@ -707,7 +707,11 @@ class DemoService:
                   else self._settings.gateway_address)
         client = self._make_client(target, 0.75)
         status_client = None   # 硬件模式在 acquire 成功后创建（状态通道）
-        state: dict[str, Any] = {"seq": 0, "clock": None, "token": ""}
+        # send_lock：心跳线程与步骤线程并发调用 _send，「seq += 1」的读改写
+        # 非原子，偶发同值 → 网关按严格递增拒绝后到帧（2026-11-23 夜间实测
+        # 以 stale_sequence 终止一次运行的根因）
+        state: dict[str, Any] = {"seq": 0, "clock": None, "token": "",
+                                 "send_lock": threading.Lock()}
         try:
             self._set_phase("running", "申请运动控制权…")
             state["token"], state["clock"] = self._acquire(client)
@@ -867,25 +871,29 @@ class DemoService:
                 None, float(pose.get("speed", 0.0)), float(pose["yaw"]))
 
     def _send(self, client, state: dict, action: str) -> dict:
-        """发送一帧。硬件模式除 stop 外一律携带 PC3 单调钟截止时间。"""
-        state["seq"] += 1
-        if self._hardware:
-            kwargs: dict[str, Any] = {"timeout": 0.5}
-            if action != "stop":
-                clock = state["clock"]
-                if clock is None:
-                    raise DemoAbort("缺少网关时钟样本，无法计算指令有效期")
-                kwargs["gateway_deadline_ms"] = clock.translate(
-                    time.monotonic_ns() + TTL_MS * 1_000_000)
-            reply = client.teleop_command(state["token"], state["seq"], action, 0, **kwargs)
-        else:
-            # 模拟网关按宿主机 Unix 时间校验，剩余有效期上限 500ms
-            reply = client.teleop_command(state["token"], state["seq"], action,
-                                          int(time.time() * 1000) + 240, timeout=0.5)
-        clock = GatewayClock.from_reply(reply)
-        if clock is not None:
-            state["clock"] = clock
-        return reply
+        """发送一帧。硬件模式除 stop 外一律携带 PC3 单调钟截止时间。
+
+        持锁整段（序号自增 + RPC + 时钟回写）：并发线程（心跳/步骤/播报期
+        续租）共享序号与网关时钟，不加锁会发出重复序号被网关拒绝。"""
+        with state["send_lock"]:
+            state["seq"] += 1
+            if self._hardware:
+                kwargs: dict[str, Any] = {"timeout": 0.5}
+                if action != "stop":
+                    clock = state["clock"]
+                    if clock is None:
+                        raise DemoAbort("缺少网关时钟样本，无法计算指令有效期")
+                    kwargs["gateway_deadline_ms"] = clock.translate(
+                        time.monotonic_ns() + TTL_MS * 1_000_000)
+                reply = client.teleop_command(state["token"], state["seq"], action, 0, **kwargs)
+            else:
+                # 模拟网关按宿主机 Unix 时间校验，剩余有效期上限 500ms
+                reply = client.teleop_command(state["token"], state["seq"], action,
+                                              int(time.time() * 1000) + 240, timeout=0.5)
+            clock = GatewayClock.from_reply(reply)
+            if clock is not None:
+                state["clock"] = clock
+            return reply
 
     _TRANSIENT_CODES = frozenset({"expired", "invalid_expiry"})
 
