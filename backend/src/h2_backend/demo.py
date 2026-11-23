@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+from collections import deque
 from contextlib import suppress
 from typing import Any
 from uuid import uuid4
@@ -63,30 +64,63 @@ FRAME_INTERVAL = 0.1            # 巡航段指令节奏
 HEARTBEAT_INTERVAL = 0.5        # 停留期间维持租约（租约期限 2 秒）
 SETTLE_AFTER_BURST = 0.7        # 提前停流后等步态停稳与位姿收敛的时间
 SETTLE_AFTER_STEP = 1.5         # 每步停稳时间，再进入下一步或抓取识别结果
-ODOM_SCALE = 3.31              # DDS 里程计尺度（2026-11-22 标定：4.06m/1.23m=3.31）：直线距离反馈源
 TASK_SUCCESS_SETTLE_S = 5.0     # 停靠任务成功后（播报完）的额外停留
 TASK_GIVE_UP_S = 15.0           # 停靠任务最长等待，超时放弃继续
-STALL_GRACE_S = 5.0             # 停留步后免检期：步态重启的里程计冻结窗口
-DIST_TOLERANCE_M = 0.05         # 直线步容差
+STALL_GRACE_S = 5.0             # 停留步后免检期：步态重启的速度冻结窗口
 YAW_TOLERANCE_RAD = math.radians(3)
-# 硬件逼近策略：HybridWalk 需要持续指令流才提交迈步（2026-11-20 实测 0.5m/s 单帧
-# 150ms 只引起重心调整不抬脚，回执正常），因此不做短帧脉冲，而是连续发帧、
-# 剩余量小于提前量时停流，停稳测量后以小段流纠偏；步态最小粒度可能大于精调
-# 容差，纠偏次数用尽后放宽到现场容差接受，避免在目标附近来回摆动。
-# 2026-11-20 单步实测：位姿反馈延迟约 0.2–0.3s，0.5m/s 下的停距约 0.25m
-# （前进 0.3m 停在 0.43m），提前量按实测停距设置。
-CUT_EARLY_M = 0.25              # 剩余距离小于此值停止指令流
+
+# ---- 直线步：时间主控（2026-11-23 标定改型）----
+# 实测依据：① DDS 里程计位置不积分 SDK 指令行走（2026-11-22，3m 实走仅 0.33m），
+# 距离闭环无反馈源可用；② 定时指令重复性好——0.5m/s×2s 单发 4 轮位移
+# 0.737–0.804m（散布 6.7cm），等效起步时延 ≈0.47s；③ 指令偶发不被应答
+# （1/5，回执 3104、10s 超时），帧流天然自愈（下一帧即重试）。
+# 因此主段按时间模型开环发巡航帧，速度着门狗（DDS speed 字段，活着）确认
+# 真的在走，停稳后 FastLIO 可用则按停点误差做有界精修；FastLIO 不可用/
+# 跳变中则接受当前停点继续（降级完成，不再中止演示）。
+WALK_SPEED_MPS = 0.5            # 巡航指令速度，须与网关 H2_V_FORWARD/_BACKWARD 一致
+SIM_WALK_SPEED_MPS = 0.35       # 模拟网关 LINEAR_SPEED（模拟模式无起步时延）
+WALK_STARTUP_S = 0.5            # 步态起步+收步等效时延（时间→距离模型截距）
+TRIM_STARTUP_S = 0.3            # 精修短流的等效时延（步态已热，截距更小）
+TRIM_TOLERANCE_M = 0.15         # FastLIO 可用时的停点精修阈值
+TRIM_LIMIT_M = 0.5              # 单次精修的误差上限（更大误差视为异常，不追防跳变牵引）
+TRIM_PASSES = 2                 # 精修次数上限
+JUMP_REJECT_M = 0.35            # FastLIO 单帧(0.1s)位移超此值判跳变丢弃
+TIME_MOVE_MARGIN_S = 1.0        # 主段时间预算的兜底余量（超时视为异常步）
+STALL_SECONDS = 15.0            # 停滞判定窗口
+STALL_SPEED_MPS = 0.05          # 速度着门狗阈值：窗口峰值低于此值视为没在走
+STALL_SPEED_WINDOW_S = 3.0      # 速度峰值观察窗
+STARTUP_ARM_S = 2.0             # 中途看门狗的武装时延（步态起步期速度本就为零）
+
+# ---- 转向逼近（保持 IMU 闭环，2026-11-22 调参后实测很准）----
 # 转向阈值实测在 0.55 附近临界（手动按住偶尔只扭腰不迈步），取 0.7 留余量；
-# 0.7 rad/s 下反应超冲约 12–19°，提前量 15°、接受窗 20°。
-CUT_EARLY_RAD = math.radians(8)  # 2026-11-22 收紧：15° 时超冲过大，8° 配合纠偏更精细
+# 0.7 rad/s 下反应超冲约 12–19°，提前量 8°。接受窗 2026-11-23 曾收紧到 10°，
+# 当天 8 步实测引发来回摆动（见下），先回 20°，待盲转保护验证后逐步收紧。
+CUT_EARLY_RAD = math.radians(8)
 APPROACH_PASSES = 3             # 停流-测量-反向闭环的往返次数上限
-ACCEPT_TOLERANCE_M = 0.2        # 接受窗（步态反应超冲决定的最小可达精度）
 ACCEPT_TOLERANCE_RAD = math.radians(20)
-CRUISE_REMAINING_M = 0.3        # 剩余距离小于此值切换到慢速动作（当前与巡航同速）
 CRUISE_REMAINING_RAD = math.radians(10)
-STALL_SECONDS = 15.0            # 停滞判定窗口（步态切换期 DDS 里程计可冻结 3-5s）
-STALL_DISTANCE_M = 0.02
 STALL_YAW_RAD = math.radians(1)
+
+# ---- 转向盲转保护（2026-11-23，8 步实测来回摆动的根治项）----
+# 实测因果链：建图桥累积负载 → /pose 间歇停顿 0.1~2s → 偏航反馈 1~3s 不更新
+# → 闭环盲转，单段过转 130~148° 后反向盲转。两道保险：
+# ① 反馈新鲜度：偏航样本间隔超限立即停帧等数据（宁可停下，绝不盲转）；
+# ② 单段时长上限：同一方向的连续指令时长超过「剩余角/角速度+余量」必停
+#    重测——即使反馈完全冻结，摆幅也被钉死在一段的物理量内。
+TURN_RATE_RADPS = 0.7           # 与网关 H2_V_TURN_SLOW 一致（单段上限估算用）
+TURN_BURST_MARGIN_S = 0.8       # 单段上限余量（步态起步 + 反馈延迟）
+TURN_FEED_STALE_S = 0.6         # 偏航反馈最大允许间隔（秒）
+# 2026-11-23 12 步实测：桥的 GIL 停顿是间歇性的（阵发几秒后自愈，事后探测
+# 仅 2-11ms），等待 2s 不够——放宽到 8s，宁可多站几秒也不轻易中止演示。
+TURN_FEED_WAIT_S = 8.0          # 反馈停顿后的等待恢复时限，超时中止
+
+# ---- 名义航向簿记（2026-11-23）----
+# 前进步实测每步漂 -3~-5°：转向步原来只闭环「相对转角」，漂移跨步累积
+# （第二次右转不到位的根源）。现在路线锚定一个 nominal_yaw：转向步闭环到
+# 「名义航向 + 转角」的绝对目标（吃掉之前的漂移），前进步前偏差超阈值
+# 先用转向闭环回正。IMU 依旧是传感器，只是闭环目标从相对量升级为绝对量。
+# 回正阈值取 8°：0.7rad/s 下单帧≈4°+起步动量，比这小的纠正弊大于利。
+REALIGN_THRESHOLD_RAD = math.radians(8)   # 前进步前的回正阈值
 POSE_FAIL_LIMIT = 10            # 连续位姿拉取失败（约 1 秒）即中止
 ACQUIRE_READY_TIMEOUT = 5.0     # 等待遥控就绪的时间
 PREPARE_TIMEOUT_S = 150.0       # 准备阶段：服务拉起+就绪检测的总时限
@@ -117,43 +151,63 @@ class DemoAbort(RuntimeError):
 
 
 class _PoseTracker:
-    """由连续位姿样本累计路程与解缠偏航。
+    """由连续位姿样本累计：FastLIO 跳变门限路程、解缠偏航、IMU 积分、速度峰值。
 
-    目标一律用「步开始时的累计量 + 步幅」表达，与世界系原点无关；
-    之前步骤的抖动计入基线而不是本步增量。
-    odom_distance：机器人自身里程计的位移累计——尺度未校（实测约 1/3），
-    但相对变化可靠，用作 FastLIO 扫描匹配丢失时的运动旁证（2026-11-21：
-    行走中 FastLIO 位姿停更但机器人实际在走，停滞检测误杀）。
+    - fl_distance：FastLIO 位移累计。单帧（0.1s 轮询）位移超过 JUMP_REJECT_M
+      判为跳变丢弃并连续计数——2026-11-22 持续倒退事故的根源就是位姿跳变
+      被当真；连续拒收由调用方按时间窗决定放弃精修。
+    - speed / speed_peak()：位姿自带的机体系速度模长（真机=DDS 里程计 velocity
+      字段，模拟=网关动作速度）。位置不可信（不积分），速度字段是活的，
+      停滞检测全部基于它。
+    - x 为 None 表示本帧 FastLIO 不可用（只更新速度）。
     """
 
     def __init__(self) -> None:
-        self.distance = 0.0
+        self.fl_distance = 0.0
+        self.fl_rejects = 0          # 连续跳变拒收帧数
+        self.fl_ok = False           # 最近一帧是否为可信 FastLIO 样本
         self.yaw = 0.0
         self.imu_yaw: float | None = None   # IMU 陀螺积分（原生符号），缺失保持 None
-        self.odom_distance = 0.0            # 里程计位移累计（尺度未校，看趋势不看绝对值）
-        self._last: tuple[float, float, float] | None = None
+        self.speed: float | None = None
+        self._last_fl: tuple[float, float, float] | None = None
         self._last_imu: float | None = None
-        self._last_odom: tuple[float, float] | None = None
+        self._speed_hist: deque[tuple[float, float]] = deque(maxlen=200)
 
-    def update(self, x: float, y: float, yaw: float, imu_yaw: float | None = None,
-               odom: tuple[float, float] | None = None) -> None:
-        if self._last is not None:
-            self.distance += math.hypot(x - self._last[0], y - self._last[1])
-            self.yaw += math.remainder(yaw - self._last[2], 2 * math.pi)
-        else:
-            self.yaw = yaw
-        self._last = (x, y, yaw)
+    def update(self, x: float | None, y: float | None, yaw: float | None,
+               imu_yaw: float | None = None, speed: float | None = None) -> None:
+        if x is not None and y is not None and yaw is not None:
+            if self._last_fl is not None:
+                delta = math.hypot(x - self._last_fl[0], y - self._last_fl[1])
+                if delta > JUMP_REJECT_M:
+                    self.fl_rejects += 1
+                    self.fl_ok = False
+                else:
+                    self.fl_distance += delta
+                    self.fl_rejects = 0
+                    self.fl_ok = True
+                    self.yaw += math.remainder(yaw - self._last_fl[2], 2 * math.pi)
+            else:
+                self.yaw = yaw
+                self.fl_ok = True
+            self._last_fl = (x, y, yaw)
         if imu_yaw is not None:
             if self._last_imu is not None:
                 self.imu_yaw = (self.imu_yaw or 0.0) + math.remainder(imu_yaw - self._last_imu, 2 * math.pi)
             else:
                 self.imu_yaw = 0.0
             self._last_imu = imu_yaw
-        if odom is not None:
-            if self._last_odom is not None:
-                self.odom_distance += math.hypot(odom[0] - self._last_odom[0],
-                                                 odom[1] - self._last_odom[1])
-            self._last_odom = odom
+        if speed is not None:
+            self.speed = speed
+            self._speed_hist.append((time.monotonic(), speed))
+
+    def speed_peak(self, window_s: float) -> float | None:
+        """近 window_s 秒的速度峰值（窗口外样本剪除）；无样本返回 None。"""
+        now = time.monotonic()
+        while self._speed_hist and now - self._speed_hist[0][0] > window_s:
+            self._speed_hist.popleft()
+        if not self._speed_hist:
+            return None
+        return max(speed for _, speed in self._speed_hist)
 
 
 class _PoseFeed(threading.Thread):
@@ -170,6 +224,7 @@ class _PoseFeed(threading.Thread):
         self.tracker = _PoseTracker()
         self.fail = 0
         self.imu_ok = False      # 最近一次样本是否携带有效 IMU（转向步强制要求）
+        self.last_ok_at = 0.0    # 最近一次成功采样的单调钟（盲转保护用）
         self._halt = threading.Event()
 
     def run(self) -> None:
@@ -180,8 +235,15 @@ class _PoseFeed(threading.Thread):
             else:
                 self.fail = 0
                 self.imu_ok = pose[3] is not None
-                self.tracker.update(*pose[:4], odom=pose[4] if len(pose) > 4 else None)
+                self.last_ok_at = time.monotonic()
+                self.tracker.update(*pose)
             self._halt.wait(0.1)
+
+    def since_ok(self) -> float:
+        """距最近一次成功采样的秒数；从未成功过返回大值。"""
+        if self.last_ok_at == 0.0:
+            return 1e9
+        return time.monotonic() - self.last_ok_at
 
     def poll(self) -> None:
         pass  # 后台线程自更新，运动循环无需做任何事
@@ -200,6 +262,7 @@ class _SyncPoseFeed:
         self.tracker = _PoseTracker()
         self.fail = 0
         self.imu_ok = False
+        self.last_ok_at = 0.0
 
     def poll(self) -> None:
         pose = self._service._pose(self._client)
@@ -208,7 +271,12 @@ class _SyncPoseFeed:
         else:
             self.fail = 0
             self.imu_ok = pose[3] is not None
-            self.tracker.update(*pose[:4], odom=pose[4] if len(pose) > 4 else None)
+            self.last_ok_at = time.monotonic()
+            self.tracker.update(*pose)
+
+    def since_ok(self) -> float:
+        """模拟模式同步采样，采样即成功，恒为新鲜。"""
+        return 0.0 if self.last_ok_at else 1e9
 
     def close(self) -> None:
         pass
@@ -231,6 +299,7 @@ class DemoService:
         self._checks: dict[str, bool] = {}    # 就绪检查项（准备阶段实时更新）
         self._motion_started = False           # 只在真正发出过运动帧后播报中断
         self._last_step_was_dwell = False       # 上一步是否为停留步（免检期判定）
+        self._nominal_yaw: float | None = None  # 名义航向（路线起点锚定，见常数区注释）
         self._abort = threading.Event()
         self._worker: threading.Thread | None = None
 
@@ -622,6 +691,9 @@ class DemoService:
                 feed.start()
             else:
                 feed = _SyncPoseFeed(client, self)
+            # 名义航向锚定：路线起点把当前实测航向定为基准（2026-11-23）
+            feed.poll()
+            self._nominal_yaw = self._measured_yaw(feed)
             # 全程心跳（2026-11-21）：贯穿所有步骤的不间断续租线程，
             # 消除步骤切换、任务采样、播报阻塞期间的心跳断档
             halt_hb = threading.Event()
@@ -636,9 +708,17 @@ class DemoService:
                     self._set_step(index)
                     kind = step["type"]
                     if kind == "forward":
+                        self._realign(client, state, feed)
                         self._move(client, state, feed, float(step["value"]))
                     elif kind == "turn":
-                        self._turn(client, state, feed, float(step["value"]))
+                        degrees = float(step["value"])
+                        # 绝对目标：名义航向 + 转角（吃掉前进步攒下的漂移）
+                        anchor = self._nominal_yaw
+                        target_yaw = None if anchor is None \
+                            else anchor + math.radians(degrees)
+                        self._turn(client, state, feed, degrees, target_yaw=target_yaw)
+                        if anchor is not None:
+                            self._nominal_yaw = math.remainder(target_yaw, 2 * math.pi)
                     else:
                         self._dwell(client, state, step)
                 self._set_step(len(route["steps"]))
@@ -687,26 +767,24 @@ class DemoService:
         return reply["token"], GatewayClock.from_reply(reply)
 
     def _pose(self, client):
-        """硬件模式用 FastLIO 位姿（DDS 里程计存在 1/3 尺度问题，不用）。
+        """位姿采样，返回 (x, y, yaw, imu_yaw, speed)。
 
-        返回 (x, y, yaw, imu_yaw)；imu_yaw 来自桥的陀螺积分，桥旧版无此字段
-        时为 None，转向闭环退回扫描匹配 yaw。
+        硬件模式：x/y/yaw 来自 FastLIO（不可用时为 None——速度仍然返回，
+        时间主控的直线步降级继续）；imu_yaw 来自桥的陀螺积分（停更时 None，
+        转向闭环强制要求，见 _turn）；speed 来自网关 GetState 的 DDS 速度
+        模长（停滞检测唯一可靠源，旧网关无此字段时为 None）。
+        模拟模式：位姿即网关积分结果，速度由网关动作给出。
+        全部来源缺失才返回 None（计一次位姿失败）。
         """
         if self._hardware:
             payload = field.fastlio_pose(timeout=0.8)
-            # odom 独立获取（不依赖 FastLIO）：2026-11-22 实测 FastLIO 抖动
-            # 导致 _pose 返回 None → odom 停更 → 2m 目标走 5m 仍不停
             try:
-                odom_pose = client.get_state().get("pose")
-                odom = (float(odom_pose["x"]), float(odom_pose["y"])) if odom_pose else None
-            except Exception:  # noqa: BLE001
-                odom = None
+                gateway_pose = client.get_state().get("pose") or {}
+                speed = float(gateway_pose["speed"]) if "speed" in gateway_pose else None
+            except Exception:  # noqa: BLE001 - 速度缺失不影响 FastLIO 路径
+                speed = None
             if payload is None:
-                if odom is None:
-                    return None    # 两者都不可用才计失败
-                # FastLIO 不可用但 odom 正常：返回 odom 数据（FastLIO 置零），
-                # _move 用 odom 做距离不受影响；建图阀门断流由 _check_field 兜底
-                return (0.0, 0.0, 0.0, None, odom)
+                return None if speed is None else (None, None, None, None, speed)
             # IMU 只在「有样本且未停更」时提供：初始 0 或停更的积分不能当转角
             imu = payload.get("imu_yaw")
             imu_fresh = (payload.get("imu_valid") is True
@@ -714,13 +792,13 @@ class DemoService:
                          and payload["imu_age_ms"] <= IMU_STALE_MS)
             return (float(payload["x"]), float(payload["y"]), float(payload["yaw"]),
                     float(imu) if imu_fresh and isinstance(imu, (int, float)) else None,
-                    odom)   # odom 来自 GetState（DDS），作运动旁证
+                    speed)
         state = client.get_state()
         pose = state.get("pose")
         if not pose:
             return None
         return (float(pose["x"]), float(pose["y"]), float(pose["yaw"]),
-                None, (float(pose["x"]), float(pose["y"])))   # 模拟模式 odom=自身位姿
+                None, float(pose.get("speed", 0.0)))
 
     def _send(self, client, state: dict, action: str) -> dict:
         """发送一帧。硬件模式除 stop 外一律携带 PC3 单调钟截止时间。"""
@@ -768,74 +846,106 @@ class DemoService:
         if self._hardware and not field.DATA_VALVES.get("mapping", True):
             raise DemoAbort("雷达数据接入被关闭，位姿来源中断")
 
+    @staticmethod
+    def _measured_yaw(feed) -> float:
+        """当前实测航向（左正约定）：优先 IMU 积分，缺失退回扫描匹配 yaw。"""
+        tracker = feed.tracker
+        if tracker.imu_yaw is not None:
+            return IMU_YAW_SIGN * tracker.imu_yaw
+        return tracker.yaw
+
+    def _realign(self, client, state: dict, feed) -> None:
+        """前进步前的航向回正（2026-11-23）：实测与名义偏差超阈值先闭环转回。
+
+        前进步实测每步漂 -3~-5°，不回正会在连续前进步与后续转向里累积。
+        偏差小于阈值（2°）直接返回，不额外耗时。"""
+        if self._nominal_yaw is None:
+            return
+        delta = math.remainder(self._nominal_yaw - self._measured_yaw(feed), 2 * math.pi)
+        if abs(delta) >= REALIGN_THRESHOLD_RAD:
+            self._turn(client, state, feed, math.degrees(delta))
+
     def _move(self, client, state: dict, feed, distance: float) -> None:
-        """直线步（2026-11-22 里程计版）：距离反馈改用机器人自身 DDS 里程计
-        （×ODOM_SCALE 校正），FastLIO 行走中的跳变/丢失不再影响行进判定。
-        转向步不受影响（原本用 IMU）。"""
+        """直线步（2026-11-23 时间主控版，标定见常数区注释）。
+
+        主段：T = 距离/巡航速度 + 起步时延 的连续帧流，开环行进；
+        帧流每 0.1s 重发一次，运控偶发不应答（3104）由下一帧自愈。
+        速度着门狗：DDS 速度峰值持续低于阈值 → 判「没在走」中止。
+        精修段：FastLIO 可用且未跳变时，按停点误差做有界短流补走
+        （慢速动作）；FastLIO 缺失/跳变/误差异常 → 接受当前停点继续，
+        不再中止整个演示。
+        """
         sign = 1.0 if distance >= 0 else -1.0
-        cruise, slow = (("forward", "forward_slow") if sign > 0
-                        else ("backward", "backward_slow"))
-        reverse_slow = "backward_slow" if sign > 0 else "forward_slow"
-        # 里程计基线与目标（里程计增量 = 实际距离 / 尺度）
-        # 模拟模式的里程计=网关位姿（无尺度），硬件模式=DDS 里程计（约 1/3）
-        scale = ODOM_SCALE if self._hardware else 1.0
-        # 停留步后免检期：长时间站立→重新起步的里程计冻结窗口（2026-11-22）
+        cruise = "forward" if sign > 0 else "backward"
+        trim_go = "forward_slow" if sign > 0 else "backward_slow"
+        trim_back = "backward_slow" if sign > 0 else "forward_slow"
+        # 模拟网关按 LINEAR_SPEED 积分且无起步时延；硬件 0.5m/s + 起步截距
+        model_speed = WALK_SPEED_MPS if self._hardware else SIM_WALK_SPEED_MPS
+        startup = WALK_STARTUP_S if self._hardware else 0.0
+        # 停留步后免检期：长时间站立→重新起步的步态冻结窗口（2026-11-22）
         grace_until = time.monotonic() + STALL_GRACE_S if self._last_step_was_dwell else 0
         self._last_step_was_dwell = False
-        odom_base = feed.tracker.odom_distance
-        odom_target = odom_base + abs(distance) / scale
-        odom_tol = DIST_TOLERANCE_M / scale
-        odom_cut = CUT_EARLY_M / scale
-        odom_accept = ACCEPT_TOLERANCE_M / scale
-        deadline = time.monotonic() + 15 + abs(distance) / 0.05
-        stall_odom_base = feed.tracker.odom_distance
-        stall_at = time.monotonic()
-        passes = 0
-        while True:
+        # 精修基线：步开始前的 FastLIO 累计路程（主段后用它算停点误差）
+        fl_base = feed.tracker.fl_distance
+
+        # —— 主段：时间主控帧流 ——
+        target_s = abs(distance) / model_speed + startup
+        started = time.monotonic()
+        deadline = started + target_s + TIME_MOVE_MARGIN_S
+        step_peak: float | None = None   # 本步全程速度峰值（None=从未有速度样本）
+        while time.monotonic() - started < target_s:
             self._check_abort()
             self._check_field()
+            self._send_checked(client, state, cruise)
             feed.poll()
-            tracker = feed.tracker
+            now = time.monotonic()
             if feed.fail >= POSE_FAIL_LIMIT:
-                raise DemoAbort("位姿丢失（建图数据中断）")
-            remaining = odom_target - tracker.odom_distance
-            if abs(remaining) <= odom_tol:
-                break
-            if time.monotonic() > deadline:
+                raise DemoAbort("位姿丢失（速度与建图数据同时中断）")
+            if now > deadline:
                 raise DemoAbort(f"前进 {abs(distance):.2f}m 步超时")
-            # 停滞检测（纯里程计，不再依赖 FastLIO）
-            if tracker.odom_distance - stall_odom_base >= STALL_DISTANCE_M / scale:
-                stall_odom_base = tracker.odom_distance
-                stall_at = time.monotonic()
-            elif time.monotonic() < grace_until:
-                stall_at = time.monotonic()   # 免检期内不计时（步态重启窗口）
-            elif time.monotonic() - stall_at > STALL_SECONDS:
-                raise DemoAbort("指令持续发送而里程计不涨：速度低于行走阈值，"
-                                "请上调网关 H2_V_*_SLOW 环境变量后重试")
-            # 纠偏保护：后退不超过 0.5m 等效里程，超限接受当前位置
-            if (remaining > 0 and tracker.odom_distance < odom_base - 0.5 / scale):
-                break
-            if not self._hardware:
-                # 模拟：连续帧流直接收敛
-                action = cruise if remaining > CRUISE_REMAINING_M / scale else (slow if remaining > 0 else reverse_slow)
-                self._send_checked(client, state, action)
-                time.sleep(FRAME_INTERVAL)
-            elif abs(remaining) > odom_cut:
-                # 闭环行进（含反向纠偏）
-                self._send_checked(client, state, slow if remaining > 0 else reverse_slow)
-                time.sleep(FRAME_INTERVAL)
-            elif abs(remaining) <= odom_accept:
-                break
-            elif passes < APPROACH_PASSES:
-                passes += 1
-                self._send_checked(client, state, "stop")
-                time.sleep(SETTLE_AFTER_BURST)
-            else:
-                raise DemoAbort(f"前进目标未收敛（剩余 {abs(remaining):.2f}m）")
+            if feed.tracker.speed is not None:
+                step_peak = feed.tracker.speed if step_peak is None \
+                    else max(step_peak, feed.tracker.speed)
+            # 中途看门狗：起步武装期过后，观察窗内速度峰值仍为零 → 没在走
+            peak = feed.tracker.speed_peak(STALL_SPEED_WINDOW_S)
+            if (peak is not None and peak < STALL_SPEED_MPS
+                    and now > grace_until and now - started > STARTUP_ARM_S):
+                raise DemoAbort("指令持续发送而速度为零：速度低于行走阈值，"
+                                "请检查网关 H2_V_* 环境变量后重试")
+            time.sleep(FRAME_INTERVAL)
         self._send_checked(client, state, "stop")
         time.sleep(SETTLE_AFTER_STEP)
+        # 步末兜底：短步撑不到中途看门狗的武装期，用全程峰值判定
+        # （从未收到速度样本的旧网关跳过——无法判定而不是判死）
+        if step_peak is not None and step_peak < STALL_SPEED_MPS:
+            raise DemoAbort("本步全程未检测到行走（速度峰值低于行走阈值），"
+                            "请检查运控是否应答后重试")
 
-    def _turn(self, client, state: dict, feed, degrees: float) -> None:
+        # —— 精修段：FastLIO 可用时按停点误差有界补走 ——
+        for _ in range(TRIM_PASSES):
+            feed.poll()
+            tracker = feed.tracker
+            if not tracker.fl_ok:
+                # FastLIO 缺失或连续跳变中：降级接受当前停点
+                return
+            error = abs(distance) - (tracker.fl_distance - fl_base)   # 正=欠走
+            if abs(error) <= TRIM_TOLERANCE_M or abs(error) > TRIM_LIMIT_M:
+                return   # 达标；或误差大得可疑（疑似位姿异常），不追防牵引
+            action = trim_go if error > 0 else trim_back
+            trim_s = abs(error) / model_speed + (TRIM_STARTUP_S if self._hardware else 0.0)
+            trim_started = time.monotonic()
+            while time.monotonic() - trim_started < trim_s:
+                self._check_abort()
+                self._check_field()
+                self._send_checked(client, state, action)
+                time.sleep(FRAME_INTERVAL)
+            self._send_checked(client, state, "stop")
+            time.sleep(SETTLE_AFTER_STEP)
+
+    def _turn(self, client, state: dict, feed, degrees: float, *,
+              target_yaw: float | None = None) -> None:
+        """转向步。target_yaw 给定时闭环到该绝对航向（名义航向簿记），
+        否则按当前实测 + 增量（回正调用即此用法）。"""
         positive = ("turn_left", "turn_left_slow") if TURN_LEFT_POSITIVE \
             else ("turn_right", "turn_right_slow")
         negative = ("turn_right", "turn_right_slow") if TURN_LEFT_POSITIVE \
@@ -850,14 +960,17 @@ class DemoService:
             time.sleep(0.2)   # 等桥的积分稳定
 
         # 转向反馈优先 IMU 陀螺积分（左正）；无 IMU 时退回扫描匹配 yaw
-        start_yaw = IMU_YAW_SIGN * feed.tracker.imu_yaw if feed.tracker.imu_yaw is not None \
-            else feed.tracker.yaw
-        target = start_yaw + math.radians(degrees)
+        start_yaw = self._measured_yaw(feed)
+        target = target_yaw if target_yaw is not None \
+            else start_yaw + math.radians(degrees)
         deadline = time.monotonic() + 15 + abs(math.radians(degrees)) / 0.1
         stall_yaw = start_yaw
         stall_at = time.monotonic()
         passes = 0
-        stall_odom_base = feed.tracker.odom_distance
+        cap_hits = 0               # 单段时长上限触发次数（诊断信息）
+        seg_dir = 0                # 当前段方向 +1左/-1右/0无（单段上限跟踪）
+        seg_started = 0.0
+        seg_span = 0.0             # 段开始时的剩余角
         while True:
             self._check_abort()
             self._check_field()
@@ -869,6 +982,18 @@ class DemoService:
                 # 转向闭环强制要求新鲜 IMU：初始无效或运行中停更都立即中止，
                 # 不回退到扫描匹配 yaw（快转时不可信，2026-11-20 三源实测）
                 raise DemoAbort("IMU 数据无效（未收到或已停更），转向中止等待人工")
+            # 盲转保险①（仅硬件）：偏航反馈间隔超限 → 立即停帧等数据。
+            # 2026-11-23 实测：桥负载令 /pose 间歇停顿 0.1~2s，闭环盲转导致
+            # 单段过转 130~148° 来回摆——宁可停下，绝不盲转。
+            if self._hardware and feed.since_ok() > TURN_FEED_STALE_S:
+                self._send_checked(client, state, "stop")
+                waited = 0.0
+                while feed.since_ok() > TURN_FEED_STALE_S and waited < TURN_FEED_WAIT_S:
+                    time.sleep(0.05)
+                    waited += 0.05
+                if feed.since_ok() > TURN_FEED_STALE_S:
+                    raise DemoAbort("偏航反馈中断（建图桥停顿），转向中止等待人工")
+                continue   # 数据恢复后重新评估剩余角
             turn_yaw = IMU_YAW_SIGN * tracker.imu_yaw if tracker.imu_yaw is not None else tracker.yaw
             remaining = target - turn_yaw
             if abs(remaining) <= YAW_TOLERANCE_RAD:
@@ -879,9 +1004,8 @@ class DemoService:
                 stall_yaw, stall_at = turn_yaw, time.monotonic()
             elif time.monotonic() < grace_until:
                 stall_at = time.monotonic()   # 免检期
-            elif abs(tracker.odom_distance - stall_odom_base) >= STALL_DISTANCE_M / 3:
-                # IMU 偏航不涨但里程计位置在变：机器人在动（重心转移），继续等
-                stall_odom_base = tracker.odom_distance
+            elif (tracker.speed_peak(STALL_SPEED_WINDOW_S) or 0) >= STALL_SPEED_MPS:
+                # IMU 偏航不涨但机体系速度非零：机器人在动（重心转移/原地踏步），继续等
                 stall_at = time.monotonic()
             elif time.monotonic() - stall_at > STALL_SECONDS:
                 raise DemoAbort("指令持续发送而偏航不涨：角速度低于行走阈值，"
@@ -892,7 +1016,25 @@ class DemoService:
                 self._send_checked(client, state, action)
                 time.sleep(FRAME_INTERVAL)
             elif abs(remaining) > CUT_EARLY_RAD:
-                # 与直线步同款闭环（含反向），见 _move 注释
+                # 盲转保险②：单段时长上限——同一方向连续指令的时长超过
+                # 「剩余角/角速度+余量」必停重测。反馈即使完全冻结，
+                # 摆幅也被钉死在单段物理量内（约 10° 级）。
+                direction = 1 if remaining > 0 else -1
+                now = time.monotonic()
+                if direction != seg_dir:
+                    seg_dir, seg_started, seg_span = direction, now, abs(remaining)
+                elif now - seg_started > seg_span / TURN_RATE_RADPS + TURN_BURST_MARGIN_S:
+                    # 单段超时：先查纠偏预算（remaining > CUT_EARLY 时永远走不到
+                    # 下方常规的 passes 检查，必须在这里收口，否则冻结反馈下无限循环）
+                    if passes >= APPROACH_PASSES:
+                        raise DemoAbort(f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°，"
+                                        f"单段超时 {cap_hits + 1} 次：偏航反馈疑似停顿）")
+                    cap_hits += 1
+                    passes += 1
+                    seg_dir = 0
+                    self._send_checked(client, state, "stop")
+                    time.sleep(SETTLE_AFTER_BURST)
+                    continue
                 self._send_checked(client, state, positive[1] if remaining > 0 else negative[1])
                 time.sleep(FRAME_INTERVAL)
             elif abs(remaining) <= ACCEPT_TOLERANCE_RAD:
@@ -902,7 +1044,10 @@ class DemoService:
                 self._send_checked(client, state, "stop")
                 time.sleep(SETTLE_AFTER_BURST)
             else:
-                raise DemoAbort(f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°）")
+                detail = f"转向目标未收敛（剩余 {math.degrees(remaining):.0f}°"
+                if cap_hits:
+                    detail += f"，单段超时 {cap_hits} 次：偏航反馈疑似停顿"
+                raise DemoAbort(detail + "）")
         self._send_checked(client, state, "stop")
         time.sleep(SETTLE_AFTER_STEP)
 

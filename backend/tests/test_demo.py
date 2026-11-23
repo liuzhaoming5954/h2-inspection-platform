@@ -36,11 +36,10 @@ def fast_timing(monkeypatch):
     monkeypatch.setattr(demo_module, "STALL_SECONDS", 2.0)   # 测试收紧停滞窗口
     monkeypatch.setattr(demo_module, "FRAME_INTERVAL", 0.02)
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_BURST", 0.02)
-    # 替身网关停步无惯性（不会像真机那样被停距带入接受窗），
-    # 压缩提前量与接受窗让闭环分支在测试里同样收敛。
-    monkeypatch.setattr(demo_module, "CUT_EARLY_M", 0.04)
+    # 时间主控模型速度与替身网关积分速度对齐（0.2），主段即精确到位；
+    # 转向闭环分支的提前量/接受窗压缩让闭环在测试里同样收敛。
+    monkeypatch.setattr(demo_module, "SIM_WALK_SPEED_MPS", 0.2)
     monkeypatch.setattr(demo_module, "CUT_EARLY_RAD", math.radians(2))
-    monkeypatch.setattr(demo_module, "ACCEPT_TOLERANCE_M", 0.1)
     monkeypatch.setattr(demo_module, "ACCEPT_TOLERANCE_RAD", math.radians(6))
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_STEP", 0.02)
     monkeypatch.setattr(demo_module, "HEARTBEAT_INTERVAL", 0.02)
@@ -68,14 +67,17 @@ class FakeMotionGateway:
         self.actions: list[str] = []
         self.x = 0.0
         self.yaw = 0.0
+        self.drift_yaw_rate = 0.0  # 前进时的航向漂移率（2026-11-23 回正测试注入）
 
     def _advance(self, now: float) -> None:
         if self.action in self.MOTION_ACTIONS:
             elapsed = max(0.0, min(now, self.motion_until) - self.action_since)
             if self.action in ("forward", "forward_slow"):
                 self.x += self.speed * elapsed
+                self.yaw += self.drift_yaw_rate * elapsed   # 模拟真机前进步漂航向
             elif self.action in ("backward", "backward_slow"):
                 self.x -= self.speed * elapsed
+                self.yaw -= self.drift_yaw_rate * elapsed
             elif self.action in ("turn_left", "turn_left_slow"):
                 self.yaw += self.turn_speed * elapsed
             else:
@@ -86,7 +88,13 @@ class FakeMotionGateway:
 
     def get_state(self):
         self._advance(time.monotonic())
-        pose = None if not self.pose_available else {"x": self.x, "y": 0.0, "yaw": self.yaw}
+        if not self.pose_available:
+            pose = None
+        else:
+            # speed 与真机 Pose.speed 对齐：帧窗内动作活跃即视为在走
+            moving = self.action in self.MOTION_ACTIONS
+            pose = {"x": self.x, "y": 0.0, "yaw": self.yaw,
+                    "speed": self.speed if moving else 0.0}
         return {"teleop_ready": True, "pose": pose, "simulated": True}
 
     def teleop_acquire(self):
@@ -192,10 +200,44 @@ def test_manual_run_completes_single_step(client, motion_gateway, fast_timing):
     state = wait_phase(client, "done")
     assert state["step_index"] == 1
     assert motion_gateway.released is True
-    # 0.3m 目标、±5cm 容差
+    # 时间主控：模型速度与替身一致 → 0.3m 精确到位（0.3/0.2=1.5s 帧流）
     assert motion_gateway.x == pytest.approx(0.3, abs=0.05)
-    assert "forward_slow" in motion_gateway.actions
+    assert "forward" in motion_gateway.actions
     assert "stop" in motion_gateway.actions
+
+
+def test_move_degrades_to_time_only_without_fastlio(settings, gateway, monkeypatch,
+                                                    motion_gateway, fast_timing, field_stub):
+    """真机模式 FastLIO 全程缺失（速度可用）：时间主控照常走完，不中止。
+
+    替身网关以 0.2m/s 积分而硬件模型按 0.5m/s 预算——精修也被跳过
+    （FastLIO 缺失），验证的就是「开环走完不中止」而非停点精度。"""
+    application = hardware_client(settings, gateway)
+    application.state.demo._make_client = lambda target, timeout: motion_gateway
+    monkeypatch.setattr(field, "fastlio_pose", lambda timeout=1.0: None)
+
+    with TestClient(application) as client:
+        body = {"name": "降级", "steps": [{"type": "forward", "value": 0.4}]}
+        route_id = client.post("/api/demo/routes", json=body).json()["id"]
+        client.post(f"/api/demo/routes/{route_id}/run")
+        state = wait_phase(client, "done")
+        assert state["step_index"] == 1
+        assert 0.1 < motion_gateway.x < 0.4   # 走了但未按模型走满（降级语义）
+        assert motion_gateway.released
+
+
+def test_move_trim_corrects_model_error(client, motion_gateway, fast_timing, monkeypatch):
+    """模型速度与替身失配（欠走）时，精修段按 FastLIO 停点误差补走。"""
+    monkeypatch.setattr(demo_module, "SIM_WALK_SPEED_MPS", 0.4)  # 模型快于替身 0.2 → 欠走
+    body = {"name": "精修", "steps": [{"type": "forward", "value": 0.4}]}
+    route_id = client.post("/api/demo/routes", json=body).json()["id"]
+    client.post(f"/api/demo/routes/{route_id}/run")
+    state = wait_phase(client, "done")
+    assert state["step_index"] == 1
+    # 主段 0.4/0.4=1.0s 只走 0.2m；精修按停点误差补走，收敛到精修容差内
+    # （2 倍模型误差下两轮精修后残差 0.1m ≤ TRIM_TOLERANCE_M=0.15）
+    assert motion_gateway.x == pytest.approx(0.4, abs=demo_module.TRIM_TOLERANCE_M)
+    assert "forward_slow" in motion_gateway.actions
 
 
 def test_full_route_turn_and_wait(client, motion_gateway, fast_timing):
@@ -209,6 +251,28 @@ def test_full_route_turn_and_wait(client, motion_gateway, fast_timing):
     assert motion_gateway.x == pytest.approx(0.3, abs=0.05)
     assert motion_gateway.yaw == pytest.approx(math.pi / 2, abs=math.radians(5))
     assert "heartbeat" in motion_gateway.actions
+
+
+def test_forward_drift_realigned_to_nominal(client, motion_gateway, fast_timing):
+    """前进步漂航向时：转向步闭环到名义航向、前进步前自动回正（2026-11-23）。
+
+    注入漂移率 -0.2rad/s（0.3m/0.2m/s=1.5s 前进 → 每步漂约 -0.3rad）。
+    两次右/左转各 90°（绝对目标）把第一次前进的漂移吃掉；回正在第二次
+    前进前把残留清零。终态只剩最后一步前进的新鲜漂移（-0.3）——
+    关键断言：漂移没有累积（无簿记时终态应为两步之和 -0.6）。"""
+    motion_gateway.drift_yaw_rate = -0.2
+    body = {"name": "回正路线", "steps": [{"type": "forward", "value": 0.3},
+                                          {"type": "turn", "value": -90},
+                                          {"type": "wait", "value": 0.5},
+                                          {"type": "turn", "value": 90},
+                                          {"type": "forward", "value": 0.3}]}
+    route_id = client.post("/api/demo/routes", json=body).json()["id"]
+    client.post(f"/api/demo/routes/{route_id}/run")
+    state = wait_phase(client, "done")
+    assert state["step_index"] == 5
+    # 终态航向 = 仅最后一步的新鲜漂移（-0.2×1.5s），漂移未累积
+    assert motion_gateway.yaw == pytest.approx(-0.3, abs=math.radians(5))
+    assert motion_gateway.x == pytest.approx(0.6, abs=0.1)
 
 
 def test_stop_mid_run_halts_and_releases(client, motion_gateway, fast_timing):
@@ -406,6 +470,27 @@ def test_demo_hardware_turn_requires_fresh_imu(settings, gateway, monkeypatch,
         client.post(f"/api/demo/routes/{route_id}/run")
         state = wait_phase(client, "aborted")
         assert "IMU 数据无效" in state["detail"]
+
+
+def test_turn_burst_cap_aborts_on_frozen_yaw(settings, gateway, monkeypatch,
+                                             motion_gateway, fast_timing, field_stub):
+    """盲转保险②（2026-11-23）：偏航反馈数值冻结（样本新鲜但不更新）时，
+    单段时长上限逐段刹车，passes 耗尽后带诊断中止——绝不无限盲转。"""
+    application = hardware_client(settings, gateway)
+    application.state.demo._make_client = lambda target, timeout: motion_gateway
+    # 位姿恒为 0：样本新鲜（since_ok 正常）但偏航永不更新
+    monkeypatch.setattr(field, "fastlio_pose", lambda timeout=1.0: {
+        "x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0, "age_ms": 10,
+        "imu_yaw": 0.0, "imu_valid": True, "imu_age_ms": 40})
+    monkeypatch.setattr(demo_module, "TURN_RATE_RADPS", 50.0)      # 单段上限≈0.83s
+    monkeypatch.setattr(demo_module, "TURN_BURST_MARGIN_S", 0.05)
+
+    with TestClient(application) as client:
+        body = {"name": "冻结反馈", "steps": [{"type": "turn", "value": 90}]}
+        route_id = client.post("/api/demo/routes", json=body).json()["id"]
+        client.post(f"/api/demo/routes/{route_id}/run")
+        state = wait_phase(client, "aborted", timeout=30)
+        assert "单段超时" in state["detail"]
 
 
 def test_demo_two_stage_prepare_then_start(settings, gateway, monkeypatch,
