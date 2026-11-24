@@ -43,6 +43,7 @@ def fast_timing(monkeypatch):
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_STEP", 0.02)
     monkeypatch.setattr(demo_module, "SETTLE_AFTER_BURST", 0.02)
     monkeypatch.setattr(demo_module, "HEARTBEAT_INTERVAL", 0.02)
+    monkeypatch.setattr(demo_module, "PHRASE_GAP_S", 0.02)
 
 
 class FakeMotionGateway:
