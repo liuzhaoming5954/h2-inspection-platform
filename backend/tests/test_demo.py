@@ -95,7 +95,10 @@ class FakeMotionGateway:
             moving = self.action in self.MOTION_ACTIONS
             pose = {"x": self.x, "y": 0.0, "yaw": self.yaw,
                     "speed": self.speed if moving else 0.0}
-        return {"teleop_ready": True, "pose": pose, "simulated": True}
+        # 状态自报（2026-11-24）所需字段与真机 GetState 对齐
+        return {"teleop_ready": True, "pose": pose, "simulated": True,
+                "fsm_id": 601, "battery_percent": 88.0,
+                "temperature_c": 22.5, "humidity_percent": 41.0}
 
     def teleop_acquire(self):
         if self.busy:
@@ -348,6 +351,9 @@ def field_stub(monkeypatch, motion_gateway):
                                          "session": {"id": "sess-1", "consumed": False}})
     monkeypatch.setattr(field, "set_data_valve",
                         lambda name, enabled: {"ok": True, "enabled": True})
+    # 演示旁白期的建图栈自动重启（2026-11-24）：测试里桩掉 SSH
+    monkeypatch.setattr(field, "restart_mapping_stack",
+                        lambda: {"ok": True})
     # 就绪检查项（两段式准备）：全绿
     monkeypatch.setattr(field, "asr_health",
                         lambda: {"model_ready": True, "capturing": True, "mic_recent": True,
@@ -391,13 +397,42 @@ def test_demo_voice_flow_greeting_trigger_completion(settings, gateway, monkeypa
         command.set()
         state = wait_phase(client, "done")
         assert state["step_index"] == 1
-        # 话术顺序（旁白式）：准备就绪 → 问候 → 确认 → 雷达旁白×2 →
-        # 图像旁白×2 → 巡检开始 → 完成
+        # 话术顺序（2026-11-24）：准备就绪 → 问候 → 状态自报（通信/调度/
+        # 电量/运动/温湿度/安全）→ 雷达旁白×2 → 图像旁白×2 → 巡检开始 →
+        # 完成（单步路线无任务，终态即 DONE 本体）
         assert field_stub.says == [demo_module.PREPARED_TEXT, demo_module.GREETING,
-                                   demo_module.CONFIRM,
+                                   demo_module.VOICE_OK_TEXT, demo_module.CONSOLE_OK_TEXT,
+                                   "机器人当前电量88%。",
+                                   demo_module.MOTION_OK_TEXT,
+                                   "当前环境温度22度，湿度41%。",
+                                   demo_module.SAFE_TEXT,
                                    demo_module.NARRATE_MAPPING, demo_module.MAPPING_READY,
                                    demo_module.NARRATE_VISION, demo_module.VISION_READY,
                                    demo_module.DEMO_GO, demo_module.DONE]
+        assert motion_gateway.released
+
+
+def test_demo_armed_timeout_auto_continues(settings, gateway, monkeypatch,
+                                           motion_gateway, fast_timing, field_stub):
+    """武装 5 秒未闻「开始」自动继续（2026-11-24）：口令从必需变可选。"""
+    application = hardware_client(settings, gateway)
+    application.state.demo._make_client = lambda target, timeout: motion_gateway
+    monkeypatch.setattr(field, "asr_commands",
+                        lambda since=0: {"items": [], "last_seq": 0, "boot_id": "boot-1",
+                                         "session": {"id": "sess-1", "consumed": False}})
+    monkeypatch.setattr(demo_module, "ARMED_AUTO_CONTINUE_S", 0.3)
+
+    with TestClient(application) as client:
+        routes = client.get("/api/demo/routes").json()
+        single = next(route for route in routes if route["name"] == "单步测试")
+        client.post("/api/demo/prepare")
+        wait_phase(client, "prepared")
+        client.post("/api/demo/start", json={"route_id": single["id"]})
+        # 不设口令事件：超时后自动走完
+        state = wait_phase(client, "done", timeout=30)
+        assert state["step_index"] == 1
+        assert demo_module.SAFE_TEXT in field_stub.says
+        assert demo_module.DEMO_GO in field_stub.says
         assert motion_gateway.released
 
 

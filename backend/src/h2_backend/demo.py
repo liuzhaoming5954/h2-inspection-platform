@@ -31,9 +31,14 @@ from .teleop import GatewayClock
 # 确认语包含「开始」但此刻状态已是 running，再次命中会被状态机忽略。
 GREETING = "我是中核四零四研发的数据中心巡检机器人，现在由我演示数据中心巡检功能，各位领导，请您指示！"
 PREPARED_TEXT = "巡检准备已就绪。"   # 两段式：准备按钮全部就绪后的「可以开始」信号
+# 触发后的自身状态自报（2026-11-24 操作员方案）：每句挂真实数据，某项数据
+# 缺失时整句跳过不硬编；「当前区域安全」为演示语境的固定话术。
+VOICE_OK_TEXT = "收到，当前通信正常！"
+CONSOLE_OK_TEXT = "调度软件已连接！"
+MOTION_OK_TEXT = "运动服务正常！"
+SAFE_TEXT = "当前区域安全！"
 # 演示内旁白式拉起（操作员方案 2026-11-21）：口令确认后机器人边播报边
 # 逐项启动服务，等待时间成为表演内容；首步前服务全就位，位姿门槛天然通过。
-CONFIRM = "收到，巡检演示现在开始。"
 NARRATE_MAPPING = "正在启动雷达导航服务。"
 MAPPING_READY = "雷达导航已就位。"
 NARRATE_VISION = "正在启动图像识别服务。"
@@ -120,6 +125,9 @@ SERVICE_READY_TIMEOUT_S = 90.0  # 演示旁白期：单项服务就绪等待时�
 PREPARE_POLL_S = 3.0            # 就绪复检间隔
 ASR_DOWN_LIMIT = 20             # 武装期 ASR 连续不可达约 30 秒即中止演示
 COMMAND_ACCEPT_AGE_MS = 12_000  # 口令事件接受年龄（服务端 10s 过滤 + 传输余量）
+# 武装 5 秒超时自动继续（2026-11-24 操作员方案）：「开始」口令从必需变可选，
+# 识别漏了关键词演示也不会卡死——超时后走与口令相同的后续流程。
+ARMED_AUTO_CONTINUE_S = 5.0
 IMU_STALE_MS = 1000             # IMU 采样过期线（200Hz 源，转向闭环强制要求新鲜）
 # FastLIO 平移可靠，但快速原地旋转时其 yaw 滞后/滑移（2026-11-20 三源实测：
 # 物理右转 174° 时 FastLIO 首段只报约 4 成、停稳后回补超报），转向闭环改用
@@ -512,6 +520,7 @@ class DemoService:
             self._error = None
             self._motion_started = False
             self._last_step_was_dwell = False
+            self._task_results: list[str] = []   # 各停靠任务的识别结果（终态汇总用）
 
     def _demo_worker(self, route: dict) -> None:
         try:
@@ -550,11 +559,17 @@ class DemoService:
         判定、否定句/自听/迟到/重复的拒绝都在识别服务完成，这里校验
         boot_id 与会话 id；服务重启会使旧会话失效，重新武装后旧事件不会
         重放；一次有效触发即消费——位姿未就绪的口令也消费会话，随后
-        重新武装让操作员再说一次。"""
+        重新武装让操作员再说一次。
+        5 秒未闻口令自动继续（2026-11-24 操作员方案）：「开始」从必需变
+        可选，识别漏词演示不卡死，超时走与口令相同的后续流程。"""
         since = 0
         asr_down = 0
+        armed_at = time.monotonic()
         try:
             while not self._abort.is_set():
+                if time.monotonic() - armed_at >= ARMED_AUTO_CONTINUE_S:
+                    self._perform_narrated(route, auto=True)
+                    return
                 payload = field.asr_commands(since)
                 if payload is None:
                     asr_down += 1
@@ -582,7 +597,7 @@ class DemoService:
                         continue
                     if item.get("age_ms", 99_999) > COMMAND_ACCEPT_AGE_MS:
                         continue         # 迟到事件（服务端已滤，双保险）
-                    if self._perform_narrated(route) != "armed":
+                    if self._perform_narrated(route, auto=False) != "armed":
                         return           # 已进入执行并得出结果
                     # 位姿未就绪：口令已消费当前会话，重新武装以便再说一次
                     fresh = field.asr_arm_session()
@@ -595,19 +610,56 @@ class DemoService:
             field.asr_disarm_session()
         self._finish("aborted", "操作员停止演示")
 
-    def _perform_narrated(self, route: dict) -> str:
-        """口令到达后的旁白式启动（操作员方案 2026-11-21）。
+    def _report_status(self) -> None:
+        """触发后的机器人自身状态自报（2026-11-24 操作员方案）。
 
-        确认播报 → 「正在启动雷达导航服务」→ 拉建图并等位姿/IMU 有效 →
-        「雷达导航已就位」→「正在启动图像识别服务」→ 拉视觉等画面 →
-        「图像识别已就位」→「巡检开始！」→ 执行路线。等待成为表演
-        内容，首步前服务全就位。返回执行结果状态。"""
-        self._set_phase("running", "收到口令")
-        self._say_quiet(CONFIRM)
+        每句挂真实数据：通信=识别服务健康，调度软件=上位机↔网关 gRPC，
+        电量=BMS，运动服务=FSM 601+遥控就绪，温湿度=PC2 采样（网关侧
+        新鲜窗口内才播）。某项数据缺失时整句跳过，不硬编数字；
+        「当前区域安全」为演示语境的固定话术。"""
+        with suppress(Exception):
+            if field.asr_health():
+                self._say_quiet(VOICE_OK_TEXT)
+        state: dict | None = None
+        with suppress(Exception):
+            client = self._make_client(self._settings.gateway_address, 0.75)
+            try:
+                state = client.get_state()
+            finally:
+                client.close()
+        if state is not None:
+            self._say_quiet(CONSOLE_OK_TEXT)
+            battery = state.get("battery_percent")
+            if battery is not None:
+                self._say_quiet(f"机器人当前电量{round(float(battery))}%。")
+            if state.get("fsm_id") == 601 and state.get("teleop_ready"):
+                self._say_quiet(MOTION_OK_TEXT)
+            temperature = state.get("temperature_c")
+            humidity = state.get("humidity_percent")
+            if temperature is not None and humidity is not None:
+                self._say_quiet(f"当前环境温度{round(float(temperature))}度，"
+                                f"湿度{round(float(humidity))}%。")
+        self._say_quiet(SAFE_TEXT)
 
-        # 雷达导航：拉建图，等位姿与 IMU 都有效（执行器的行进门槛）
+    def _perform_narrated(self, route: dict, *, auto: bool = False) -> str:
+        """触发后的旁白式启动（操作员方案 2026-11-21，2026-11-24 扩展）。
+
+        自身状态自报 →「正在启动雷达导航服务」→ 重启建图栈清累积负载并
+        等位姿/IMU 有效 →「雷达导航已就位」→「正在启动图像识别服务」→
+        拉视觉等画面 →「图像识别已就位」→「巡检开始！」→ 执行路线。
+        auto=True 表示 5 秒超时自动继续（未闻口令）。返回执行结果状态。"""
+        self._set_phase("running", "5 秒未闻口令，自动继续" if auto else "收到口令")
+        self._report_status()
+
+        # 雷达导航：先重启建图栈清累积负载（运维动作自动化，见 field.py
+        # restart_mapping_stack 注释），再走阀门幂等拉起与就绪等待
         self._set_phase("running", "正在启动雷达导航服务…")
         self._say_quiet(NARRATE_MAPPING)
+        self._check_abort()
+        restart = field.restart_mapping_stack()
+        if not restart.get("ok"):
+            # 尽力而为：旧栈可能仍在跑，继续拉起流程由就绪探测裁决
+            self._set_phase("running", f"建图栈重启失败（继续尝试拉起）：{restart.get('error')}")
         self._check_abort()
         result = field.set_data_valve("mapping", True)
         if not result.get("ok"):
@@ -660,7 +712,12 @@ class DemoService:
             self._finish("aborted", f"执行异常：{error}")
             return "aborted"
         if in_demo:
-            self._say_quiet(DONE)
+            # 终态播报改为巡检结果汇总（2026-11-24 操作员方案）：停在最终
+            # 位置不回起点，播报本次各停靠任务的实际识别结果
+            summary = DONE
+            if self._task_results:
+                summary += "本次巡检结果：" + "；".join(self._task_results) + "。"
+            self._say_quiet(summary)
         self._finish("done", "路线执行完成")
         return "done"
 
@@ -1188,11 +1245,16 @@ class DemoService:
                     if now - succeeded_at >= TASK_SUCCESS_SETTLE_S:
                         break           # 播报完停 5 秒，继续
                 elif now - started >= TASK_GIVE_UP_S:
+                    # 放弃也入账：终态汇总播报「未识别到」（2026-11-24 方案）
+                    label = {"qr": "二维码", "led": "指示灯", "person": "人员"}.get(task, task)
+                    self._task_results.append(f"{label}未识别到")
                     break               # 15 秒未识别到，放弃继续
                 else:
                     result = self._try_recognize(task)
                     if result is not None:
-                        self._say_quiet(result)
+                        speech, summary = result
+                        self._say_quiet(speech)
+                        self._task_results.append(summary)
                         succeeded_at = time.monotonic()
                         continue
                 time.sleep(0.5)
@@ -1201,8 +1263,12 @@ class DemoService:
             worker.join(timeout=1.0)
         self._last_step_was_dwell = True
 
-    def _try_recognize(self, task: str) -> str | None:
-        """单轮识别尝试（3 帧快速采样多数表决），成功返回播报文本。"""
+    def _try_recognize(self, task: str) -> tuple[str, str] | None:
+        """单轮识别尝试（3 帧快速采样多数表决），成功返回 (播报文本, 汇总片段)。
+
+        每站只取本任务自己的字段（2026-11-24 确认的单任务纪律）：灯站忽略
+        视野里的人与码，码站忽略灯与人，人站忽略灯与码。汇总片段用于
+        终态的巡检结果汇总播报。"""
         samples = self._sample_vision(rounds=2, interval=0.3)
         if not samples:
             return None
@@ -1212,7 +1278,8 @@ class DemoService:
             if not non_empty:
                 return None
             best = max(set(non_empty), key=non_empty.count)
-            return f"识别到二维码：{self._digits_for_tts(best[:200])}"
+            digits = self._digits_for_tts(best[:200])
+            return f"识别到二维码：{digits}", f"二维码内容：{digits}"
         if task == "led":
             leds = [int(s.get("led") or 0) for s in samples]
             led = max(set(leds), key=leds.count)
@@ -1222,13 +1289,14 @@ class DemoService:
             greens = [int(s.get("green") or 0) for s in samples]
             red = max(set(reds), key=reds.count)
             green = max(set(greens), key=greens.count)
-            return f"识别到信号灯{led}盏，其中红色{red}盏、绿色{green}盏"
+            return (f"识别到信号灯{led}盏，其中红色{red}盏、绿色{green}盏",
+                    f"指示灯{led}盏（红{red}绿{green}）")
         if task == "person":
             people = [int(s.get("person") or 0) for s in samples]
             person = max(set(people), key=people.count)
             if person == 0:
                 return None
-            return f"视野内共{person}人"
+            return f"视野内共{person}人", f"现场人员{person}名"
         return None
 
     def _sample_vision(self, rounds: int = 3, interval: float = 0.5) -> list[dict]:
@@ -1241,26 +1309,6 @@ class DemoService:
             time.sleep(interval)
         return samples
 
-    def _perform_task(self, client, state: dict, task: str) -> None:
-        """停靠点识别任务：三帧多数表决后播报（防单帧闪烁误报）。
-
-        采样（约 1.5 秒）+ 播报全程由心跳线程续租——2026-11-21 实测：
-        采样期间不续租导致 2 秒租约过期，网关撤销后执行中止。"""
-        halt = threading.Event()
-
-        def beat() -> None:
-            while not halt.wait(HEARTBEAT_INTERVAL):
-                with suppress(Exception):
-                    self._send(client, state, "heartbeat")
-
-        worker = threading.Thread(target=beat, daemon=True, name="h2-demo-task-beat")
-        worker.start()
-        try:
-            self._perform_task_inner(client, state, task)
-        finally:
-            halt.set()
-            worker.join(timeout=1.0)
-
     @staticmethod
     def _digits_for_tts(text: str) -> str:
         """数字逐字播报：'100' → '一零零'（2026-11-22 现场要求：
@@ -1269,35 +1317,3 @@ class DemoService:
                    "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
         return "".join(mapping.get(ch, ch) if ch.isdigit() else ch for ch in text)
 
-    def _perform_task_inner(self, client, state: dict, task: str) -> None:
-        samples = self._sample_vision()
-        if not samples:
-            self._say_holding_lease(client, state, "视觉数据不可用")
-            return
-        if task == "qr":
-            texts = [str(s.get("qr") or "").strip() for s in samples]
-            non_empty = [t for t in texts if t]
-            if not non_empty:
-                return    # 无二维码，安静跳过
-            # 取出现最多的文本
-            best = max(set(non_empty), key=non_empty.count)
-            self._say_holding_lease(client, state, f"识别到二维码：{best[:80]}")
-        elif task == "led":
-            leds = [int(s.get("led") or 0) for s in samples]
-            reds = [int(s.get("red") or 0) for s in samples]
-            greens = [int(s.get("green") or 0) for s in samples]
-            led = max(set(leds), key=leds.count)
-            red = max(set(reds), key=reds.count)
-            green = max(set(greens), key=greens.count)
-            if led == 0:
-                self._say_holding_lease(client, state, "未识别到信号灯")
-            else:
-                self._say_holding_lease(client, state,
-                                        f"识别到信号灯{led}盏，其中红色{red}盏、绿色{green}盏")
-        elif task == "person":
-            people = [int(s.get("person") or 0) for s in samples]
-            person = max(set(people), key=people.count)
-            if person == 0:
-                self._say_holding_lease(client, state, "视野内无人")
-            else:
-                self._say_holding_lease(client, state, f"视野内共{person}人")

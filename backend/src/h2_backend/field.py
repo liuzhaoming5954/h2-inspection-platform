@@ -54,6 +54,35 @@ PC3_VOICE_START = ("cd ~/h2-inspection-platform"
                    " nohup .venv/bin/python ~/h2-asr/voice_service.py"
                    " > ~/h2-asr/voice_service.log 2>&1 < /dev/null &")
 
+# 演示前清零建图栈（2026-11-23 夜间运维结论固化为自动动作）：
+# 桥的点云累积在行走建图时增长极快，/pose 间歇停顿会拖累 livox 反馈采样；
+# 容器内的旧桥是 root 进程，宿主机 pkill 杀不掉，重启容器是唯一可靠手段。
+# 就绪由调用方的位姿探测兜底（演示的 90 秒就绪时限覆盖重启全程 ~40s）。
+PC3_MAPPING_RESTART = [
+    "docker restart ros-noetic-dev",
+    (f"docker exec -d ros-noetic-dev bash -c '{PC3_ROS_ENV}"
+     " && roslaunch /workspace/h2_extra/h2_mapping_headless.launch"
+     " > /tmp/mapping.log 2>&1'"),
+    (f"docker exec -d ros-noetic-dev bash -c '{PC3_ROS_ENV}"
+     " && python3 /workspace/h2_extra/h2_map_bridge.py"
+     " > /tmp/bridge.log 2>&1'"),
+]
+
+
+def restart_mapping_stack() -> dict:
+    """重启 PC3 建图容器并重拉建图栈与数据桥（见 PC3_MAPPING_RESTART 注释）。
+
+    尽力而为：失败不抛出（旧栈可能仍在跑，演示照常），返回 ok=False 附原因；
+    成功后需等待约 25~40 秒位姿才恢复，由调用方的就绪轮询覆盖。"""
+    try:
+        _ssh(PC3, PC3_MAPPING_RESTART[0], timeout=45)
+    except (FieldError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "error": str(error)[:160]}
+    time.sleep(2)
+    for command in PC3_MAPPING_RESTART[1:]:
+        _ssh_best_effort(PC3, command, timeout=15)
+    return {"ok": True}
+
 # 数据接入阀门：只存在于后端进程内存。相机/雷达默认开（显示是常态），
 # 语音默认关（主动使用型功能，开机不自动采音），重启回到此默认。
 DATA_VALVES = {"vision": True, "mapping": True, "asr": False}
