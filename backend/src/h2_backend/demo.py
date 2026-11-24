@@ -86,7 +86,10 @@ WALK_SPEED_MPS = 0.5            # 巡航指令速度，须与网关 H2_V_FORWARD
 SIM_WALK_SPEED_MPS = 0.35       # 模拟网关 LINEAR_SPEED（模拟模式无起步时延）
 WALK_STARTUP_S = 0.5            # 步态起步+收步等效时延（时间→距离模型截距）
 TRIM_STARTUP_S = 0.3            # 精修短流的等效时延（步态已热，截距更小）
-TRIM_TOLERANCE_M = 0.15         # FastLIO 可用时的停点精修阈值
+# 精修阈值 0.15→0.3（2026-11-24 现场试验方案）：帧流主段每 2m 系统性
+# 过冲 ~0.2m，0.15 阈值导致每站必触发反向纠偏（现场观感"往后倒一下"）；
+# 放宽到 0.3 后多数站不再倒退，停点精度降为 ±0.3m。待对比时延重标方案。
+TRIM_TOLERANCE_M = 0.3          # FastLIO 可用时的停点精修阈值
 TRIM_LIMIT_M = 0.5              # 单次精修的误差上限（更大误差视为异常，不追防跳变牵引）
 TRIM_PASSES = 2                 # 精修次数上限
 JUMP_REJECT_M = 0.35            # FastLIO 单帧(0.1s)位移超此值判跳变丢弃

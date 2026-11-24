@@ -231,15 +231,15 @@ def test_move_degrades_to_time_only_without_fastlio(settings, gateway, monkeypat
 
 
 def test_move_trim_corrects_model_error(client, motion_gateway, fast_timing, monkeypatch):
-    """模型速度与替身失配（欠走）时，精修段按 FastLIO 停点误差补走。"""
-    monkeypatch.setattr(demo_module, "SIM_WALK_SPEED_MPS", 0.4)  # 模型快于替身 0.2 → 欠走
+    """模型速度与替身失配（欠走）且超出精修阈值时，按 FastLIO 停点误差补走。"""
+    # 模型 1.0 快于替身 0.2 五倍：主段 0.4s 只走 0.08m，误差 0.32m 超过
+    # 精修阈值（2026-11-24 放宽到 0.3m）→ 必须触发补走并收敛到容差内
+    monkeypatch.setattr(demo_module, "SIM_WALK_SPEED_MPS", 1.0)
     body = {"name": "精修", "steps": [{"type": "forward", "value": 0.4}]}
     route_id = client.post("/api/demo/routes", json=body).json()["id"]
     client.post(f"/api/demo/routes/{route_id}/run")
     state = wait_phase(client, "done")
     assert state["step_index"] == 1
-    # 主段 0.4/0.4=1.0s 只走 0.2m；精修按停点误差补走，收敛到精修容差内
-    # （2 倍模型误差下两轮精修后残差 0.1m ≤ TRIM_TOLERANCE_M=0.15）
     assert motion_gateway.x == pytest.approx(0.4, abs=demo_module.TRIM_TOLERANCE_M)
     assert "forward_slow" in motion_gateway.actions
 
