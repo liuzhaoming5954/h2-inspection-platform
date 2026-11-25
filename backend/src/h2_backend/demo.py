@@ -733,9 +733,9 @@ class DemoService:
             self._finish("aborted", f"执行异常：{error}")
             return "aborted"
         if in_demo:
-            # 终态汇总（2026-11-24 操作员句式）：巡检任务执行完毕！本次共执行
-            # N 个巡检任务，共发现信号灯 x 个，二维码 x 个，人员 x 名，汇报
-            # 完毕，请领导指示！放弃的任务计入执行数、对应项按 0 计。
+            # 终态汇总（2026-11-24 操作员句式，25 日收尾改「汇报完毕！」）：
+            # 巡检任务执行完毕！本次共执行 N 个巡检任务，共发现信号灯 x 个，
+            # 二维码 x 个，人员 x 名，汇报完毕！放弃的任务计入执行数、对应项按 0 计。
             results = self._task_results
             if results:
                 led_total = sum(r.get("count", 0) for r in results if r["task"] == "led")
@@ -743,7 +743,7 @@ class DemoService:
                 person_total = sum(r.get("count", 0) for r in results if r["task"] == "person")
                 self._say_quiet(f"巡检任务执行完毕！本次共执行{len(results)}个巡检任务，"
                                 f"共发现信号灯{led_total}个，二维码{qr_total}个，"
-                                f"人员{person_total}名，汇报完毕，请领导指示！")
+                                f"人员{person_total}名，汇报完毕！")
             else:
                 self._say_quiet(DONE)
         self._finish("done", "路线执行完成")
