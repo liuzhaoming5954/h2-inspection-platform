@@ -553,6 +553,34 @@ def _startup() -> None:
         if connected:
             _hw_vad_loop()
     threading.Thread(target=_hw_vad_starter, daemon=True, name="hw-vad").start()
+    # 开机自动起采音（2026-11-25 根因修复）：此前开机不采集，须手动
+    # /asr/start 才有数据流——两天内两次把演示准备阶段卡到超时。
+    asr_start()
+    threading.Thread(target=_capture_watchdog, daemon=True, name="capture-watchdog").start()
+
+
+def _capture_watchdog() -> None:  # pragma: no cover - 需要 arecord 设备
+    """采集看门狗（2026-11-25）：线程死亡或数据流停更 >15s 时自动重启。
+
+    现场规律：XVF3800 偶发零数据把 arecord 拖成僵尸、采集线程退出，
+    服务自身无自愈（健康页只如实报告 capturing=False）。停更判定用
+    _mic_last_window 心跳——播放抑制只丢弃内容不停止读数，窗心跳
+    仍更新，不受影响。"""
+    while True:
+        time.sleep(5)
+        try:
+            thread = _capture_thread
+            dead = thread is None or not thread.is_alive()
+            stale = (_capturing and (_mic_last_window is None
+                                     or time.monotonic() - _mic_last_window > 15.0))
+            if dead or stale:
+                print(f"[asr] watchdog: capture {'dead' if dead else 'stale'} → restart",
+                      flush=True)
+                asr_stop()
+                time.sleep(0.5)
+                asr_start()
+        except Exception as error:  # noqa: BLE001 - 看门狗自身绝不退出
+            print(f"[asr] watchdog error: {error!r}", flush=True)
 
 
 @app.get("/health")
@@ -593,12 +621,6 @@ def asr_start() -> dict:
     _capture_thread = threading.Thread(target=_capture_loop, daemon=True, name="asr-capture")
     _capture_thread.start()
     _submit_warmup()              # 采音启动即预热：首转挂起不留给待命期
-    return {"ok": True, "already": False}
-    proc = subprocess.Popen(ARECORD, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, bufsize=1 << 16)
-    _capture_proc = proc
-    _capturing = True
-    threading.Thread(target=_capture_loop, daemon=True, name="asr-capture").start()
     return {"ok": True, "already": False}
 
 
