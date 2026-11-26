@@ -66,6 +66,8 @@ export interface RobotState {
 export interface ServiceHealth {
   status?: string
   hardware_teleop?: boolean
+  // 后端每次启动生成；变化即表示后端已重启，进程内保存的登录令牌全部失效
+  instance_id?: string
 }
 
 // 巡检演示：编排层只描述 距离(米)/角度(度，左转为正)/停留(秒)，速度由执行器管理

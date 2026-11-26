@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import RoomScene from './components/RoomScene.vue'
 import MapPanel from './components/MapPanel.vue'
 import EnvironmentChart from './components/EnvironmentChart.vue'
 import TeleopPanel from './components/TeleopPanel.vue'
 import DemoPanel from './components/DemoPanel.vue'
+import LoginPage from './components/LoginPage.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
 import { busy as demoBusyFlag, demoBusy, phase as demoPhase, prepareDemo, quickRoute, startDemo, stopDemo, QUICK_ROUTE_NAME } from './demoStore'
 
@@ -65,6 +66,91 @@ const active = computed(() => Boolean(selectedTask.value && !terminalStates.has(
 const robotBusy = computed(() => ['running', 'accepted', 'stopping'].includes(robot.value?.status ?? ''))
 const remoteTeleop = computed(() => !!(robot.value?.teleop_active || robot.value?.status === 'teleop'))
 const teleopLocked = computed(() => teleopSession.value || remoteTeleop.value)
+
+// 真机模式登录门（方案 A）：密码校验、错误计数与令牌签发都在后端，这里只持有令牌。
+// 令牌放 sessionStorage：刷新页面不掉线，关闭页面后需重新登录。
+// 后端重启后令牌失效，校验不通过即回到登录页。其余接口不做拦截，登录门只是操作闸门。
+const AUTH_TOKEN_KEY = 'h2.auth.token'
+const SYSTEM_TITLE = '中核404 数据中心巡检机器人调度系统'
+const authToken = ref<string | null>(sessionStorage.getItem(AUTH_TOKEN_KEY))
+// 当前令牌是否已通过后端校验；为 false 时真机模式不渲染主界面。
+const authVerified = ref(false)
+const authGate = computed(() => hardwareConfigured.value === true && !authVerified.value)
+// 运行模式未决，或真机令牌尚在校验中：先显示中性的加载屏，避免闪现主界面。
+const resolving = computed(() => (hardwareConfigured.value === null && serviceLoading.value)
+  || (hardwareConfigured.value === true && authToken.value !== null && !authVerified.value))
+// 真机模式下已登录才轮询现场链路；登录和退出时自动启停。
+const fieldPolling = computed(() => hardwareConfigured.value === true && authVerified.value)
+
+function clearAuthToken() {
+  authToken.value = null
+  authVerified.value = false
+  sessionStorage.removeItem(AUTH_TOKEN_KEY)
+}
+function onLoggedIn(token: string) {
+  authToken.value = token
+  authVerified.value = true
+  sessionStorage.setItem(AUTH_TOKEN_KEY, token)
+}
+async function verifyStoredToken() {
+  const token = authToken.value
+  if (!token || disposed) return
+  try {
+    // 令牌走请求头，不进访问日志。
+    const result = await request<{ valid: boolean }>('/api/auth/check', { cache: 'no-store', headers: { 'X-Auth-Token': token } })
+    if (disposed) return
+    if (result.valid) authVerified.value = true
+    else clearAuthToken()
+  } catch {
+    // 校验请求本身失败（服务暂不可达）：稍后重试，避免卡在加载屏。
+    if (!disposed) setTimeout(() => { void verifyStoredToken() }, 2000)
+  }
+}
+watch(hardwareConfigured, configured => {
+  if (configured !== true) return
+  document.title = SYSTEM_TITLE
+  void verifyStoredToken()
+})
+// 登录后启动机器人状态轮询；未登录时 pollRobot 自行跳过并停止排程。
+watch(authVerified, verified => { if (verified) void pollRobot() })
+// 遥控会话或演示执行期间不能退出：退出会卸载遥控面板并释放租约。
+const logoutDisabled = computed(() => teleopLocked.value || demoBusy.value)
+function logout() {
+  if (logoutDisabled.value) return
+  clearAuthToken()
+}
+
+// 后端每次启动生成不同的实例标识：页面发现它变化即判定后端已重启，
+// 进程内保存的登录令牌随之全部失效，已打开的页面无需刷新即回到登录页。
+const backendInstance = ref<string | null>(null)
+
+// 侧栏修改登录密码：旧密码由后端校验，两次新密码一致且非空才提交。
+const passwordForm = reactive({ old: '', next: '', confirm: '' })
+const savingPassword = ref(false)
+const passwordMessage = ref('')
+const passwordMessageOk = ref(false)
+async function changePassword() {
+  const token = authToken.value
+  if (savingPassword.value || !token) return
+  const show = (text: string, ok = false) => { passwordMessage.value = text; passwordMessageOk.value = ok }
+  if (!passwordForm.old || !passwordForm.next) { show('请填写当前密码和新密码'); return }
+  if (passwordForm.next !== passwordForm.confirm) { show('两次输入的新密码不一致'); return }
+  savingPassword.value = true
+  try {
+    await request('/api/auth/change', {
+      method: 'POST',
+      body: JSON.stringify({ token, old_password: passwordForm.old, new_password: passwordForm.next }),
+    })
+    passwordForm.old = ''
+    passwordForm.next = ''
+    passwordForm.confirm = ''
+    show('登录密码已更新，下次登录请使用新密码', true)
+  } catch (error) {
+    show(errorMessage(error))
+  } finally {
+    savingPassword.value = false
+  }
+}
 const teleopDisabledReason = computed(() => {
   if (hardwareMode.value) {
     if (hardwareConfigured.value !== true || robot.value?.simulated === true) return '等待真机遥控模式确认'
@@ -265,10 +351,11 @@ const asrNote = computed(() => {
   return `机器人麦克风 · 实时转写 · 已 ${asrItems.value.length} 条`
 })
 
-watch(hardwareConfigured, (configured, _, onCleanup) => {
+// 登录或退出时重启现场轮询：退出后登录页背后不再拉取预览帧与转写。
+watch(fieldPolling, (polling, _, onCleanup) => {
   fieldStatus.value = null
   visionStatus.value = null
-  if (configured !== true) return
+  if (!polling) return
   void pollField()
   void pollVision()
   void pollVisionFrame()
@@ -364,6 +451,10 @@ async function sync() {
   try {
     const health = await request<ServiceHealth>('/api/health')
     if (disposed) return
+    if (health.instance_id && health.instance_id !== backendInstance.value) {
+      backendInstance.value = health.instance_id
+      clearAuthToken()
+    }
     hardwareConfigured.value = health.hardware_teleop === true
     serviceAvailable.value = health.status !== 'error'
     serviceError.value = ''
@@ -392,7 +483,8 @@ async function sync() {
 // 页面位姿只由串行执行的机器人状态轮询更新。
 // 任务和健康检查独立请求，较慢的响应不会覆盖新位姿。
 async function pollRobot() {
-  if (disposed || robotRequest) return
+  // 真机模式未登录时不轮询；登录成功后由 authVerified 的监听重新启动。
+  if (disposed || robotRequest || authGate.value) return
   clearTimeout(robotPollTimer)
   const controller = new AbortController()
   robotRequest = controller
@@ -517,7 +609,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'hardware-shell': hardwareMode, 'hardware-drawer-open': hardwareMode && sidebarOpen }">
+  <!-- 运行模式未决或真机令牌校验中：中性加载屏，避免闪现主界面 -->
+  <div v-if="resolving" class="app-resolving" role="status" aria-live="polite">
+    <span class="brand-icon">H<span>2</span></span>
+    <span>正在连接系统…</span>
+  </div>
+  <!-- 真机模式登录门：登录页替换整个主界面，通过校验前不渲染任何机器人状态 -->
+  <LoginPage v-else-if="authGate" @logged-in="onLoggedIn" />
+  <div v-else class="app-shell" :class="{ 'hardware-shell': hardwareMode, 'hardware-drawer-open': hardwareMode && sidebarOpen }">
     <aside class="sidebar" :class="{ 'hardware-sidebar': hardwareMode, 'drawer-open': hardwareMode && sidebarOpen }">
       <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2巡检平台' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'INSPECTION PLATFORM' : 'INSPECTION CONSOLE' }}</span></span></a>
       <template v-if="!hardwareMode">
@@ -545,6 +644,15 @@ onBeforeUnmount(() => {
         </div>
         <small v-if="fieldMessage" class="field-message" role="status">{{ fieldMessage }}</small>
       </div>
+      <!-- 修改登录密码：旧密码由后端校验；改密后当前会话保持登录，下次登录用新密码 -->
+      <form v-if="modeKnown && hardwareMode" class="sidebar-field sidebar-password" data-testid="password-card" aria-label="修改登录密码" novalidate @submit.prevent="changePassword">
+        <div class="sidebar-field-head"><span class="sidebar-field-title">修改登录密码</span></div>
+        <input v-model="passwordForm.old" class="password-input" type="password" placeholder="当前密码" autocomplete="current-password" aria-label="当前密码" data-testid="password-old" />
+        <input v-model="passwordForm.next" class="password-input" type="password" placeholder="新密码" autocomplete="new-password" aria-label="新密码" data-testid="password-new" />
+        <input v-model="passwordForm.confirm" class="password-input" type="password" placeholder="确认新密码" autocomplete="new-password" aria-label="确认新密码" data-testid="password-confirm" />
+        <button class="password-submit" type="submit" data-testid="password-submit" :disabled="savingPassword">{{ savingPassword ? '保存中…' : '保存新密码' }}</button>
+        <p v-if="passwordMessage" class="password-message" :class="passwordMessageOk ? 'ok' : 'error'" role="status">{{ passwordMessage }}</p>
+      </form>
       <template v-if="modeKnown && !hardwareMode">
         <div class="sidebar-section">验证链路</div>
         <div class="chain-item"><span class="chain-num">01</span><span>任务编排与下发</span></div>
@@ -605,6 +713,11 @@ onBeforeUnmount(() => {
                       :title="!quickRoute ? `未找到路线「${QUICK_ROUTE_NAME}」` : demoPhase !== 'prepared' ? '请先点「准备」并等待就绪播报' : ''"
                       @click="quickRoute && startDemo(quickRoute.id)">⏻ 演示</button>
             </template>
+            <!-- 退出登录：回到登录页。遥控会话或演示执行期间不可退出 -->
+            <button class="strip-btn strip-logout" type="button" data-testid="logout"
+                    :disabled="logoutDisabled"
+                    :title="logoutDisabled ? '遥控会话或演示执行期间不能退出登录' : '退出登录'"
+                    @click="logout">退出</button>
           </span>
         </section>
         <div v-if="connectionError" class="connection-alert" role="alert"><strong>服务连接异常</strong><span>{{ connectionError }}</span><button @click="refreshAll">重新连接</button></div>
@@ -691,7 +804,8 @@ onBeforeUnmount(() => {
 .sidebar-field-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .sidebar-field-title { color: #e6eef5; font-size: 13px; font-weight: 600; }
 /* 主区状态带：连接、运动服务、电量、温湿度和视觉识别一行内联摘要。 */
-.status-strip { display: flex; align-items: center; margin-bottom: 14px; padding: 8px 6px; border: 1px solid #e4eaf0; border-radius: 8px; background: #fff; box-shadow: 0 2px 4px #283e5a02; overflow: hidden; }
+/* 上下内边距 4px：右端按钮高 28px，加上内边距与边框后状态带保持 38px，不挤压下方工作区 */
+.status-strip { display: flex; align-items: center; margin-bottom: 14px; padding: 4px 6px; border: 1px solid #e4eaf0; border-radius: 8px; background: #fff; box-shadow: 0 2px 4px #283e5a02; overflow: hidden; }
 .status-item { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 15px; white-space: nowrap; }
 .status-item + .status-item { border-left: 1px solid #eef2f5; }
 .status-item label { flex-shrink: 0; color: #7f8c98; font-size: 11px; }
@@ -707,6 +821,51 @@ onBeforeUnmount(() => {
 .strip-btn:disabled { opacity: .5; cursor: not-allowed; }
 .strip-start:not(:disabled) { border-color: #35a0a4; color: #0f6f72; background: #e8f6f6; }
 .strip-stop { border-color: #c0392b; color: #c0392b; background: #fff; }
+.strip-logout { border-color: #d7e4eb; background: #fff; color: #5c7484; }
+/* 模式未决时的中性加载屏：底色与主界面页面底色一致，两种模式切入都不跳色 */
+.app-resolving {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 16px;
+  background: #f4f6f8;
+  color: #82909c;
+  font-size: 12px;
+  letter-spacing: .5px;
+}
+/* 侧栏修改登录密码卡：沿用链路管理卡的深色卡片语言 */
+.sidebar-password { display: flex; flex-direction: column; gap: 7px; }
+.password-input {
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .05);
+  color: #dfe9f2;
+  font-size: 12px;
+  outline: 0;
+}
+.password-input::placeholder { color: #5f7488; }
+.password-input:focus { border-color: #35a18c; box-shadow: 0 0 0 2px rgba(53, 161, 140, .18); }
+.password-submit {
+  height: 32px;
+  margin-top: 2px;
+  border: 1px solid rgba(53, 161, 140, .6);
+  border-radius: 6px;
+  background: rgba(22, 136, 139, .28);
+  color: #7fe0d2;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.password-submit:hover:not(:disabled) { background: rgba(22, 136, 139, .42); }
+.password-submit:disabled { opacity: .5; cursor: not-allowed; }
+.password-message { margin: 0; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.password-message.ok { color: #7fe0d2; }
+.password-message.error { color: #f0a99f; }
 /* 工作区三列：地图/图像/语音转写通高并排；演示的控制与进度在侧栏，不再占主区。
    行随视口高度伸缩（min-content 下限保证最小可读尺寸）。 */
 .hardware-workspace {

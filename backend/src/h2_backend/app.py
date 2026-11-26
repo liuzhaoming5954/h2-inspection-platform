@@ -1,14 +1,16 @@
 import asyncio
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from . import field
+from .auth_gate import AuthGate
 from .config import Settings
 from .demo import DemoService
 from .service import InspectionService, ServiceError
@@ -99,6 +101,7 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
         teleop_gateway = gateway
     service = InspectionService(settings, gateway)
     demo = DemoService(settings, service)
+    app_instance_id = secrets.token_urlsafe(12)
 
     async def maintain() -> None:
         while True:
@@ -151,7 +154,9 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
 
     @app.get("/api/health")
     def health():
-        return service.health()
+        # instance_id 每次后端启动都不同：前端发现它变化即判定后端已重启，
+        # 进程内保存的登录令牌随之全部失效，已打开的页面自动回到登录页。
+        return {**service.health(), "instance_id": app_instance_id}
 
     # 现场链路的探测与恢复接口只在真机模式下注册。
     field_routes = APIRouter(prefix="/api/field")
@@ -288,6 +293,35 @@ def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI
         return demo.run_route(route_id)
 
     app.include_router(demo_routes)
+
+    # 真机模式登录门（方案 A）：仅验证/改密/令牌校验三个接口，其余 API 不拦截。
+    auth_gate = AuthGate(service)
+    app.state.auth_gate = auth_gate
+    auth_routes = APIRouter(prefix="/api/auth")
+
+    class LoginRequest(BaseModel):
+        password: str = Field(min_length=1)
+
+    class ChangePasswordRequest(BaseModel):
+        token: str
+        old_password: str = Field(min_length=1)
+        new_password: str
+
+    @auth_routes.post("/verify")
+    def auth_verify(payload: LoginRequest):
+        return {"ok": True, "token": auth_gate.verify(payload.password)}
+
+    # 令牌走请求头而不是查询串，避免出现在访问日志中。
+    @auth_routes.get("/check")
+    def auth_check(x_auth_token: Annotated[str | None, Header(alias="X-Auth-Token")] = None):
+        return {"valid": bool(x_auth_token) and auth_gate.check(x_auth_token)}
+
+    @auth_routes.post("/change")
+    def auth_change(payload: ChangePasswordRequest):
+        auth_gate.change(payload.token, payload.old_password, payload.new_password)
+        return {"ok": True}
+
+    app.include_router(auth_routes)
 
     @app.get("/api/robot")
     def robot():

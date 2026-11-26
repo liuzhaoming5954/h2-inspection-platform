@@ -98,3 +98,15 @@ class DemoRoute(Base):
     steps: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AppCredential(Base):
+    """上位机登录凭据：单行（id=1）存储真机模式登录门的密码哈希与盐。
+
+    仅作为操作闸门（方案 A）：其余 API 不做拦截，真实运动安全仍由
+    遥控租约独占与现场规程保障。首次验证时自动播种默认密码。
+    """
+    __tablename__ = "app_credential"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    salt: Mapped[str] = mapped_column(String(32))
+    password_hash: Mapped[str] = mapped_column(String(64))
