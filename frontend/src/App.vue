@@ -7,7 +7,7 @@ import EnvironmentChart from './components/EnvironmentChart.vue'
 import TeleopPanel from './components/TeleopPanel.vue'
 import DemoPanel from './components/DemoPanel.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
-import { demoBusy } from './demoStore'
+import { busy as demoBusyFlag, demoBusy, phase as demoPhase, prepareDemo, quickRoute, startDemo, stopDemo, QUICK_ROUTE_NAME } from './demoStore'
 
 const defaultPoints: RoutePoint[] = [
   { id: 'p01', label: 'A01机柜', x: -3, y: -1.8 },
@@ -578,13 +578,34 @@ onBeforeUnmount(() => {
              手动刷新由状态轮询承担，省出的高度全部留给工作区；模拟模式维持原版页头。 -->
         <div v-if="!hardwareMode" class="page-heading"><div><div class="eyebrow">ROBOT INSPECTION / PROOF OF CONCEPT</div><h1>巡检技术验证台</h1><p>连接任务、机器人与巡检证据，验证完整业务链路。</p></div><button class="api-link" type="button" @click="refreshAll"><span>↻</span> 刷新状态</button></div>
         <div v-if="modeKnown && !hardwareMode" class="validation-banner"><span class="banner-icon">i</span><div><strong>模拟机器人 · 合成数据</strong><span>当前用于软件技术验证，巡检数据不代表真实机房状态。</span></div><span class="banner-label">TECHNICAL VALIDATION</span></div>
-        <!-- 真机状态带：连接、运动服务、电量、温湿度和视觉识别一行内联摘要；链路管理在侧栏。 -->
+        <!-- 真机状态带：连接、运动服务、电量、温湿度和视觉识别一行内联摘要；链路管理在侧栏。
+             右端固定路线（多点测试-12步）的准备/演示快捷按钮，与侧栏演示卡共享同一份 store 状态。 -->
         <section v-if="hardwareMode" class="status-strip" aria-label="真机连接与遥控状态">
           <span class="status-item"><i :class="['status-dot', connected ? 'online' : 'offline']"></i><strong>{{ loading ? '连接中' : connected ? '已连接' : '未连接' }}</strong><small>{{ connected ? (robot?.robot_id ?? 'H2 真机') : '等待业务服务和网关' }}</small></span>
           <span class="status-item"><label>运动服务</label><strong :title="`最近查询 ${lastSync || '—'}`">{{ hardwareState }}</strong></span>
           <span class="status-item"><label>电量</label><strong>{{ battery == null ? '—' : battery.toFixed(0) }}<i v-if="battery != null">%</i></strong><span class="mini-battery"><span :style="{ width: `${battery ?? 0}%` }"></span></span></span>
           <span class="status-item"><label>温湿度</label><strong>{{ environmentTemperature != null && environmentHumidity != null ? environmentTemperature.toFixed(1) + '℃ / ' + environmentHumidity.toFixed(1) + '%RH' : '—' }}</strong><small :title="environmentNote">{{ environmentNote }}</small></span>
           <span class="status-item"><label>视觉</label><strong>{{ visionPerson ?? '—' }} 人 · {{ visionLedTotal ?? '—' }} 灯</strong><small :title="visionQr ?? visionNote">{{ visionNote }}</small></span>
+          <!-- 演示快捷入口：准备中/待命/执行中合并为停止按钮，其余状态为准备+演示两键 -->
+          <span class="status-actions">
+            <template v-if="demoBusy">
+              <button class="strip-btn strip-stop" type="button" data-testid="strip-demo-stop"
+                      :disabled="demoBusyFlag === 'stop'"
+                      title="停止演示" @click="stopDemo">■ 停止演示</button>
+            </template>
+            <template v-else>
+              <button class="strip-btn" type="button" data-testid="strip-prepare"
+                      :disabled="!quickRoute || !!demoBusyFlag || demoPhase === 'prepared'"
+                      :title="!quickRoute ? `未找到路线「${QUICK_ROUTE_NAME}」` : demoPhase === 'prepared' ? '已就绪' : ''"
+                      @click="prepareDemo">
+                {{ demoBusyFlag === 'prepare' ? '准备中…' : '⚙ 准备' }}
+              </button>
+              <button class="strip-btn strip-start" type="button" data-testid="strip-demo-start"
+                      :disabled="!quickRoute || !!demoBusyFlag || demoPhase !== 'prepared'"
+                      :title="!quickRoute ? `未找到路线「${QUICK_ROUTE_NAME}」` : demoPhase !== 'prepared' ? '请先点「准备」并等待就绪播报' : ''"
+                      @click="quickRoute && startDemo(quickRoute.id)">⏻ 演示</button>
+            </template>
+          </span>
         </section>
         <div v-if="connectionError" class="connection-alert" role="alert"><strong>服务连接异常</strong><span>{{ connectionError }}</span><button @click="refreshAll">重新连接</button></div>
 
@@ -679,6 +700,13 @@ onBeforeUnmount(() => {
 .status-item small { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #94a0aa; font-size: 10px; }
 .mini-battery { flex-shrink: 0; width: 56px; height: 4px; border-radius: 3px; background: #eff3f5; overflow: hidden; }
 .mini-battery span { display: block; height: 100%; border-radius: 3px; background: #7eb9a4; max-width: 100%; }
+/* 状态带右端：固定路线（多点测试-12步）的准备/演示快捷按钮 */
+.status-actions { margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center; gap: 8px; padding-left: 15px; border-left: 1px solid #eef2f5; }
+.strip-btn { border: 1px solid #c9dedf; border-radius: 999px; background: #f4fafa; color: #277e80; padding: 5px 12px; font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.strip-btn:hover:not(:disabled) { border-color: #16888b; }
+.strip-btn:disabled { opacity: .5; cursor: not-allowed; }
+.strip-start:not(:disabled) { border-color: #35a0a4; color: #0f6f72; background: #e8f6f6; }
+.strip-stop { border-color: #c0392b; color: #c0392b; background: #fff; }
 /* 工作区三列：地图/图像/语音转写通高并排；演示的控制与进度在侧栏，不再占主区。
    行随视口高度伸缩（min-content 下限保证最小可读尺寸）。 */
 .hardware-workspace {

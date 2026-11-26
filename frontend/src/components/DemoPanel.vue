@@ -35,7 +35,7 @@ onBeforeUnmount(() => { stopDemoPolling() })
               :disabled="!!busy" @click="prepareDemo">⚙ 准备</button>
       <button v-if="props.hardware && !demoBusy" class="demo-start" type="button" data-testid="demo-start"
               :disabled="!selected || !!busy || !prepared" :title="prepared ? '' : '请先点击「巡检准备」并等待就绪播报'"
-              @click="startDemo">⏻ 演示</button>
+              @click="startDemo()">⏻ 演示</button>
       <button v-if="props.hardware && demoBusy" class="demo-stop" type="button" data-testid="demo-stop"
               :disabled="!!busy" @click="stopDemo">■ 停止演示</button>
       <button class="demo-run" type="button" data-testid="demo-run"
@@ -110,7 +110,7 @@ onBeforeUnmount(() => { stopDemoPolling() })
               :disabled="!!busy" @click="prepareDemo">⚙ 巡检准备</button>
       <button v-if="props.hardware && !demoBusy" class="data-valve" type="button" data-testid="demo-start"
               :disabled="!selected || !!busy || !prepared" :title="prepared ? '' : '请先点击「巡检准备」并等待就绪播报'"
-              @click="startDemo">⏻ 巡检演示</button>
+              @click="startDemo()">⏻ 巡检演示</button>
       <button v-if="props.hardware && demoBusy" class="demo-stop" type="button" data-testid="demo-stop"
               :disabled="!!busy" @click="stopDemo">■ 停止演示</button>
       <button class="demo-run" type="button" data-testid="demo-run"

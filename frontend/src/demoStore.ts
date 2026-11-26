@@ -21,6 +21,10 @@ const draftSteps = ref<DraftStep[]>([])
 
 export { routes, selectedId, state, busy, message, editing, draftName, draftSteps }
 export const selected = computed(() => routes.value.find(route => route.id === selectedId.value) ?? null)
+
+// 状态带快捷按钮固定绑定的演示路线；按存储名精确匹配，找不到时按钮置灰。
+export const QUICK_ROUTE_NAME = '多点测试-12步'
+export const quickRoute = computed(() => routes.value.find(route => route.name === QUICK_ROUTE_NAME) ?? null)
 export const phase = computed(() => state.value?.phase ?? 'idle')
 // 「已就绪」不算忙：准备成功的瞬间必须亮出巡检演示按钮（2026-11-21 现场
 // 反馈的缺陷：prepared 误入 busy 集合导致按钮在应亮起时反而消失）
@@ -105,14 +109,16 @@ export async function prepareDemo() {
   }
 }
 
-/** 打开演示开关：要求先「巡检准备」就绪，后端播问候语并武装语音触发。 */
-export async function startDemo() {
-  if (!selected.value || busy.value) return
+/** 打开演示开关：要求先「巡检准备」就绪，后端播问候语并武装语音触发。
+ *  routeId 缺省时用侧栏选中的路线；状态带快捷按钮显式传入固定路线，互不影响侧栏选择。 */
+export async function startDemo(routeId?: string) {
+  const route = routeId ? routes.value.find(r => r.id === routeId) : selected.value
+  if (!route || busy.value) return
   busy.value = 'start'
   message.value = ''
   try {
     await request<{ ok: boolean }>('/api/demo/start', {
-      method: 'POST', body: JSON.stringify({ route_id: selected.value.id }),
+      method: 'POST', body: JSON.stringify({ route_id: route.id }),
     })
     message.value = '演示已开启：机器人播报问候语后等待「开始」口令'
     void pollState()
