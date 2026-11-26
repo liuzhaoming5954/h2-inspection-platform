@@ -8,6 +8,8 @@ import { errorMessage, request } from '../api'
  * 模拟模式不经过此页。
  */
 const emit = defineEmits<{ loggedIn: [token: string] }>()
+// 系统标题由上位机页面传入，与浏览器标签页标题保持同源
+defineProps<{ title: string }>()
 
 const password = ref('')
 const error = ref('')
@@ -45,7 +47,7 @@ async function submit() {
         <span class="brand-icon">H<span>2</span></span>
         <span class="login-brand-name">H2巡检平台</span>
       </div>
-      <h1 class="login-title">中核404 数据中心巡检机器人调度系统</h1>
+      <h1 class="login-title">{{ title }}</h1>
       <p class="login-subtitle">请输入登录密码进入调度系统</p>
       <form class="login-form" novalidate @submit.prevent="submit">
         <label class="login-field">
@@ -83,9 +85,10 @@ async function submit() {
   background-size: auto, 28px 28px, 28px 28px;
   color: #dfe9f2;
 }
+/* 卡片宽度需容下整行系统标题（约 370px），避免标题折行后末行只剩一个字 */
 .login-card {
   width: 100%;
-  max-width: 440px;
+  max-width: 472px;
   padding: 38px 40px 34px;
   border: 1px solid rgba(255, 255, 255, .1);
   border-top: 3px solid rgba(105, 180, 176, .8);
@@ -103,6 +106,8 @@ async function submit() {
   font-weight: 650;
   line-height: 1.55;
   letter-spacing: .5px;
+  /* 放不下时均匀折成两行，不出现单字末行 */
+  text-wrap: balance;
 }
 .login-subtitle { margin: 10px 0 28px; text-align: center; color: #8ba1b3; font-size: 12px; }
 .login-form { display: flex; flex-direction: column; }

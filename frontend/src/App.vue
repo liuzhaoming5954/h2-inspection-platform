@@ -44,8 +44,8 @@ function toggleSidebar() {
   if (sidebarOpen.value && sidebarToggleDisabled.value) return
   sidebarOpen.value = !sidebarOpen.value
 }
-// 演示开始（准备/武装/执行）时自动呼出侧栏：停止演示按钮与执行进度必须可见可达
-watch(demoBusy, busy => { if (busy) sidebarOpen.value = true }, { immediate: true })
+// 侧栏只在操作员点把手时开合：演示进入准备/待命/执行时不自动弹出，
+// 停止演示与退出登录都在主区状态带上，侧栏收起时同样可达。
 const submitting = ref(false)
 const stopping = ref(false)
 const reporting = ref(false)
@@ -71,7 +71,7 @@ const teleopLocked = computed(() => teleopSession.value || remoteTeleop.value)
 // 令牌放 sessionStorage：刷新页面不掉线，关闭页面后需重新登录。
 // 后端重启后令牌失效，校验不通过即回到登录页。其余接口不做拦截，登录门只是操作闸门。
 const AUTH_TOKEN_KEY = 'h2.auth.token'
-const SYSTEM_TITLE = '中核404 数据中心巡检机器人调度系统'
+const SYSTEM_TITLE = '中核四0四 数据中心巡检机器人调度系统'
 const authToken = ref<string | null>(sessionStorage.getItem(AUTH_TOKEN_KEY))
 // 当前令牌是否已通过后端校验；为 false 时真机模式不渲染主界面。
 const authVerified = ref(false)
@@ -614,8 +614,9 @@ onBeforeUnmount(() => {
     <span class="brand-icon">H<span>2</span></span>
     <span>正在连接系统…</span>
   </div>
-  <!-- 真机模式登录门：登录页替换整个主界面，通过校验前不渲染任何机器人状态 -->
-  <LoginPage v-else-if="authGate" @logged-in="onLoggedIn" />
+  <!-- 真机模式登录门：登录页替换整个主界面，通过校验前不渲染任何机器人状态。
+       标题由这里传入，与浏览器标签页标题共用同一个来源 -->
+  <LoginPage v-else-if="authGate" :title="SYSTEM_TITLE" @logged-in="onLoggedIn" />
   <div v-else class="app-shell" :class="{ 'hardware-shell': hardwareMode, 'hardware-drawer-open': hardwareMode && sidebarOpen }">
     <aside class="sidebar" :class="{ 'hardware-sidebar': hardwareMode, 'drawer-open': hardwareMode && sidebarOpen }">
       <a class="brand" href="/" aria-label="H2技术验证首页"><span class="brand-icon">H<span>2</span></span><span>{{ hardwareMode ? 'H2巡检平台' : '巡检运维' }}<span class="brand-sub">{{ hardwareMode ? 'INSPECTION PLATFORM' : 'INSPECTION CONSOLE' }}</span></span></a>
