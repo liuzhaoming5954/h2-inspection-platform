@@ -68,7 +68,7 @@ def arm(http):
 
 # ---------- 会话与口令判定 ----------
 
-def test_exact_command_triggers_once_and_consumes(client):
+def test_command_triggers_once_and_consumes(client):
     session = arm(client)
     assert session["ok"] and session["session_id"] and session["boot_id"]
     publish("开始。")
@@ -84,14 +84,33 @@ def test_exact_command_triggers_once_and_consumes(client):
     assert len(commands(client)) == 1
 
 
-def test_negated_and_non_exact_rejected(client):
+def test_command_phrase_variants_trigger(client):
+    """句中含「开始」即算口令（2026-11-26 现场放宽）：口令常被说成短句。"""
+    for phrase in ("开始巡检", "好的开始", "现在开始巡检", "开始了吗"):
+        arm(client)                          # 一次触发消费一个会话，逐句重新武装
+        publish(phrase)
+    items = commands(client)
+    assert [item["text"] for item in items] == ["开始巡检", "好的开始", "现在开始巡检", "开始了吗"]
+    # 口令句同样作为普通转写进入页面显示
+    texts = [item["text"] for item in client.get("/asr/text").json()["items"]]
+    assert "开始巡检" in texts
+
+
+def test_negated_command_also_triggers(client):
+    """现场决定不做否定词排除：否定句、转述句同样触发（待命期间须避免谈论含口令的话）。"""
+    for phrase in ("不要开始", "还没开始", "他说了开始"):
+        arm(client)
+        publish(phrase)
+    assert [item["text"] for item in commands(client)] == ["不要开始", "还没开始", "他说了开始"]
+
+
+def test_sentences_without_command_word_rejected(client):
     arm(client)
-    for text in ("不要开始", "还没开始", "他说了开始", "现在开始巡检", "开始了吗"):
+    for text in ("你好", "现在巡检吧", "开个会"):
         publish(text)
     assert commands(client) == []
-    # 否定句仍作为普通转写进入页面显示
     texts = [item["text"] for item in client.get("/asr/text").json()["items"]]
-    assert "不要开始" in texts
+    assert "现在巡检吧" in texts
 
 
 def test_not_armed_and_disarmed_rejected(client):

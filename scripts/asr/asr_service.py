@@ -6,7 +6,8 @@
 - 切段：改用 asr_vad.Segmenter（待命只留前卷、4 秒硬上限含前卷尾静、
   起声确认窗计入语音样本），修复「长时间静音后第一段为巨段」缺陷；
 - 口令会话化：演示待命/解除/命令事件独立于普通转写（/asr/session、
-  /asr/commands）。整句「开始」才算口令；武装前的声音、播报期间、
+  /asr/commands）。句中含「开始」即算口令（2026-11-26 现场放宽，原为整句
+  恰好「开始」）；武装前的声音、播报期间、
   迟到结果、重复投递与服务重启均不触发；一次有效触发即消费会话；
 - 播报自听：/asr/playback 标记播报窗口，播报期间丢弃采音，两路播报
   （/say 与关键词应答）共用该状态；
@@ -122,8 +123,7 @@ BYTES_PER_WIN = int(asr_vad.SAMPLE_RATE * asr_vad.WIN_MS / 1000) * 4   # 立体�
 MAX_RESULTS = 100             # 普通转写环形条数
 STALE_SEGMENT_S = 15.0        # 出队/发布时的旧段丢弃（只用于清积压，不是响应目标）
 COMMAND_MAX_AGE_S = 10.0      # 口令事件发布时的采样年龄上限（迟到丢弃）
-COMMAND_TEXT = "开始"
-COMMAND_STRIP = " \t。，！？!?,、;；"
+COMMAND_TEXT = "开始"        # 句中出现即算口令（包含匹配，不做否定词排除）
 INFER_TIMEOUT_S = 30.0        # 单次推理超时（2026-11-21 实测短段 2~3s、4s 段约 15s；
                               # 越长聋窗越大，挂起段拖满 60s 曾作废整个待命会话）
 RECOVERY_FAULT_LIMIT = 3      # 连续恢复次数上限，超过进入故障态等待人工
@@ -399,12 +399,14 @@ class _InferenceSupervisor:
         self._emit_command(text, meta, diag)
 
     def _emit_command(self, text: str, meta: dict, diag: dict) -> None:
-        """整句「开始」才是口令；反例、迟到、重复、武装外全部拒绝。"""
+        """句中含「开始」即算口令；迟到、重复、武装外全部拒绝。
+
+        2026-11-26 由「整句恰好为开始」放宽为包含匹配：现场常把口令说成
+        「开始巡检」「好的开始」，整句判定会漏触发。按现场决定不做否定词
+        排除——「不要开始」同样会触发，待命期间现场须避免谈论含口令的话。
+        播报自听在发布前已被丢弃，到不了这里。"""
         global _next_command_seq
-        normalized = text.strip().strip(COMMAND_STRIP)
-        if normalized != COMMAND_TEXT:
-            if COMMAND_TEXT in text:
-                _note_event("command-reject", text=text[:40], reason="not-exact")
+        if COMMAND_TEXT not in text:
             return
         with _lock:
             session = _session

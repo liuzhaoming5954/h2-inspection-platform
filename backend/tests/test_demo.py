@@ -8,6 +8,7 @@
 import math
 import threading
 import time
+import types
 
 from fastapi.testclient import TestClient
 import pytest
@@ -415,7 +416,7 @@ def test_demo_voice_flow_greeting_trigger_completion(settings, gateway, monkeypa
 
 def test_demo_armed_timeout_auto_continues(settings, gateway, monkeypatch,
                                            motion_gateway, fast_timing, field_stub):
-    """武装 5 秒未闻「开始」自动继续（2026-11-24）：口令从必需变可选。"""
+    """武装超时未闻「开始」自动继续（2026-11-24）：口令从必需变可选。"""
     application = hardware_client(settings, gateway)
     application.state.demo._make_client = lambda target, timeout: motion_gateway
     monkeypatch.setattr(field, "asr_commands",
@@ -575,3 +576,129 @@ def test_demo_start_rejected_in_simulation(client):
     reply = client.post("/api/demo/start", json={"route_id": single["id"]})
     assert reply.status_code == 409
     assert "手动执行" in reply.json()["detail"]
+
+
+# ---------- 停靠任务结论与终态汇报（2026-11-26 操作员话术） ----------
+
+def bare_demo_service(monkeypatch):
+    """真机模式的编排服务：隔离租约通道，用于直接驱动停留步。
+
+    结果列表等路线级状态由 _begin 初始化，与真实流程保持一致。"""
+    service = demo_module.DemoService(types.SimpleNamespace(hardware_teleop=True), None)
+    service._begin({"steps": []})
+    monkeypatch.setattr(service, "_send", lambda client, state, action: {"accepted": True})
+    return service
+
+
+@pytest.mark.parametrize("task, frames, sentences, record", [
+    ("led", [{"led": 5, "red": 3, "green": 2}],
+     ["识别到信号灯5盏，其中红色3盏、绿色2盏", "设备状态正常！"],
+     {"task": "led", "found": True, "count": 5, "ok": True}),
+    ("qr", [{"qr": "A-100"}],
+     ["识别到二维码：A-一零零", "资产核对一致！"],
+     {"task": "qr", "found": True, "ok": True}),
+    ("person", [{"person": 2}],
+     ["当前区域识别到人员2名", "人员进出合规！"],
+     {"task": "person", "found": True, "count": 2, "ok": True}),
+    ("person", [{"person": 3}],
+     ["当前区域识别到人员3名", "人员进出合规！"],
+     {"task": "person", "found": True, "count": 3, "ok": True}),
+    ("person", [{"person": 1}],
+     ["当前区域识别到人员1名", "当前区域不允许一人进出，人员进出不合规！"],
+     {"task": "person", "found": True, "count": 1, "ok": False}),
+])
+def test_recognition_announces_result_then_conclusion(monkeypatch, task, frames, sentences, record):
+    """识别成功：结果句之后紧跟结论句；人员任务的合规结论写进记录。"""
+    service = bare_demo_service(monkeypatch)
+    monkeypatch.setattr(service, "_sample_vision", lambda rounds=2, interval=0.3: frames)
+    assert service._try_recognize(task) == (sentences, record)
+
+
+@pytest.mark.parametrize("task, frames", [
+    ("led", [{"led": 0, "red": 0, "green": 0}]),
+    ("qr", [{"qr": None}]),
+    ("person", [{"person": 0}]),
+    ("led", []),                       # 视觉程序无输出
+])
+def test_recognition_without_target_keeps_trying(monkeypatch, task, frames):
+    """没识别到目标不算成功：返回 None，停留步继续等待。"""
+    service = bare_demo_service(monkeypatch)
+    monkeypatch.setattr(service, "_sample_vision", lambda rounds=2, interval=0.3: frames)
+    assert service._try_recognize(task) is None
+
+
+def test_dwell_success_speaks_result_and_conclusion(monkeypatch, motion_gateway, fast_timing,
+                                                    field_stub):
+    service = bare_demo_service(monkeypatch)
+    monkeypatch.setattr(service, "_try_recognize",
+                        lambda task: (["结果句", "结论句"], {"task": "qr", "found": True, "ok": True}))
+    monkeypatch.setattr(demo_module, "TASK_SUCCESS_SETTLE_S", 0.2)
+    service._dwell(None, {"seq": 0}, {"type": "wait", "value": 10, "task": "qr"})
+    assert field_stub.says == [demo_module.TASK_NAME_TEXT["qr"], "结果句", "结论句"]
+    assert service._task_results == [{"task": "qr", "found": True, "ok": True}]
+
+
+def test_dwell_qr_timeout_announces_missed(monkeypatch, motion_gateway, fast_timing, field_stub):
+    """二维码任务超时放弃：播报「未识别到二维码信息」，并按未识别到入账。"""
+    service = bare_demo_service(monkeypatch)
+    monkeypatch.setattr(demo_module, "TASK_GIVE_UP_S", 0.3)
+    monkeypatch.setattr(service, "_try_recognize", lambda task: None)
+    service._dwell(None, {"seq": 0}, {"type": "wait", "value": 10, "task": "qr"})
+    assert field_stub.says == [demo_module.TASK_NAME_TEXT["qr"], "未识别到二维码信息！"]
+    assert service._task_results == [{"task": "qr", "found": False}]
+
+
+@pytest.mark.parametrize("task", ["led", "person"])
+def test_dwell_other_task_timeout_stays_silent(monkeypatch, motion_gateway, fast_timing,
+                                               field_stub, task):
+    """信号灯、人员任务超时放弃：只播过任务名，不追加播报，按未识别到入账。"""
+    service = bare_demo_service(monkeypatch)
+    monkeypatch.setattr(demo_module, "TASK_GIVE_UP_S", 0.3)
+    monkeypatch.setattr(service, "_try_recognize", lambda task: None)
+    service._dwell(None, {"seq": 0}, {"type": "wait", "value": 10, "task": task})
+    assert field_stub.says == [demo_module.TASK_NAME_TEXT[task]]
+    assert service._task_results == [{"task": task, "found": False}]
+
+
+def test_summary_reports_measured_conclusions():
+    """三项按实测结论取值：设备正常、资产一致、人员 1 人不合规。"""
+    results = [{"task": "led", "found": True, "ok": True},
+               {"task": "qr", "found": True, "ok": True},
+               {"task": "person", "found": True, "count": 1, "ok": False}]
+    assert demo_module.summary_speech(results) == (
+        "巡检任务执行完毕！本次共执行3个巡检任务，设备运行状态正常！"
+        "资产核对一致！人员进出不合规！本次巡检任务结束！")
+
+
+def test_summary_reports_all_compliant():
+    results = [{"task": "led", "found": True, "ok": True},
+               {"task": "qr", "found": True, "ok": True},
+               {"task": "person", "found": True, "count": 2, "ok": True}]
+    assert demo_module.summary_speech(results) == (
+        "巡检任务执行完毕！本次共执行3个巡检任务，设备运行状态正常！"
+        "资产核对一致！人员进出合规！本次巡检任务结束！")
+
+
+def test_summary_marks_timed_out_tasks_as_missed():
+    results = [{"task": "led", "found": False},
+               {"task": "qr", "found": False},
+               {"task": "person", "found": False}]
+    assert demo_module.summary_speech(results) == (
+        "巡检任务执行完毕！本次共执行3个巡检任务，未识别到设备状态信息！"
+        "未识别到二维码信息！未识别到人员信息！本次巡检任务结束！")
+
+
+def test_summary_omits_task_types_absent_from_route():
+    assert demo_module.summary_speech([{"task": "qr", "found": True}]) == (
+        "巡检任务执行完毕！本次共执行1个巡检任务，资产核对一致！本次巡检任务结束！")
+
+
+@pytest.mark.parametrize("records, expected", [
+    ([{"task": "person", "found": True, "ok": True}, {"task": "person", "found": False}],
+     "未识别到人员信息！"),
+    ([{"task": "person", "found": True, "ok": True},
+      {"task": "person", "found": True, "ok": False}], "人员进出不合规！"),
+])
+def test_summary_does_not_mask_abnormal_task_among_same_type(records, expected):
+    """同类任务有多个：有超时按未识别到，有不合规按不合规，不被正常的那次掩盖。"""
+    assert expected in demo_module.summary_speech(records)
