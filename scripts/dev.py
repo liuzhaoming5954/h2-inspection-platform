@@ -96,6 +96,11 @@ def main() -> None:
     if not args.skip_db and not hardware_mode:
         subprocess.run([sys.executable, str(ROOT / 'scripts/manage_postgres.py'), 'start'], check=True)
     environment = os.environ.copy()
+    # 上位机各进程只访问回环与现场链路，不继承终端里的代理变量：
+    # 继承后后端发往 PC2/PC3 的请求会经代理超时后才失败（2026-11-27 现场）。
+    for name in list(environment):
+        if name.lower() in {'http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy', 'grpc_proxy'}:
+            del environment[name]
     environment['PATH'] = os.pathsep.join((str(PYTHON.parent), environment.get('PATH', os.defpath)))
     environment['H2_HARDWARE_TELEOP'] = '1' if hardware_mode else '0'
     gateway_args = ['--db', str(RUNTIME / 'gateway.sqlite')]

@@ -3,6 +3,7 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated, Any, Literal
+import urllib.request
 
 from fastapi import APIRouter, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,6 +88,11 @@ class DemoStartRequest(BaseModel):
 
 
 def create_app(settings: Settings | None = None, gateway: Any = None) -> FastAPI:
+    # 后端的对外 HTTP 只访问回环与现场设备，一律不经过代理。启动终端里的
+    # http_proxy 会被进程继承，而 urllib 不识别 no_proxy 中的网段写法
+    # （如 192.168.0.0/16），发往 PC2/PC3 的请求会被送进代理、等到超时才失败。
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler({})))
     settings = settings or Settings.from_env()
     teleop_gateway = None
     if gateway is None:

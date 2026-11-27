@@ -92,6 +92,24 @@ def test_external_gateway_launches_only_local_api_and_frontend(launcher, monkeyp
     assert "--no-proxy-headers" in services["api"][1]
 
 
+def test_stack_does_not_inherit_terminal_proxy_settings(launcher, monkeypatch):
+    """启动终端里的代理变量不传给上位机各进程：后端继承后，发往 PC2/PC3 的请求会
+    经代理超时后才失败（2026-11-27 现场）。"""
+    for name in ("http_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY", "ftp_proxy", "grpc_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:7897")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,192.168.0.0/16")
+    monkeypatch.setenv("H2_HARDWARE_TELEOP", "0")
+    monkeypatch.setenv("H2_DATABASE_URL", "postgresql://example.invalid/inspection")
+    monkeypatch.setenv("H2_DATA_DIR", "/inspection-data")
+
+    services, _ = start(launcher, monkeypatch)
+
+    proxy_names = {"http_proxy", "https_proxy", "all_proxy", "ftp_proxy", "grpc_proxy"}
+    for name, (_, _, environment) in services.items():
+        assert not {key for key in environment if key.lower() in proxy_names}, name
+        assert environment["no_proxy"] == "localhost,127.0.0.1,192.168.0.0/16"
+
+
 @pytest.mark.parametrize("args", [
     ["start", "--external-gateway", "0.0.0.0:15051"],
     ["start", "--external-gateway", "192.0.2.1:15051"],

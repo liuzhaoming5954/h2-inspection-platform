@@ -1,8 +1,10 @@
 from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 import json
 import shlex
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 import urllib.request
@@ -452,3 +454,41 @@ def test_manual_field_start_uses_configured_sensor_addresses(monkeypatch, overri
     assert f"H2_PC2_BIND={pc2_bind}" in shlex.split(agent[1])
     assert gateway[0] == pc3_host
     assert f"H2_SENSOR_AGENT_URL={override_url or monitor_url}" in shlex.split(gateway[1])
+
+
+def test_backend_http_never_uses_environment_proxy(settings, gateway, monkeypatch):
+    """后端的对外 HTTP 一律直连：启动终端里的代理变量不得把发往现场设备的请求送进代理。
+
+    urllib 不识别 no_proxy 里的网段写法，http_proxy 被继承时 PC2/PC3 的请求会等到
+    超时才失败（2026-11-27 现场）。"""
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # 没有进程监听的代理地址：请求一旦走代理必然失败
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    assert not urllib.request.proxy_bypass("192.168.124.163")
+    # 清掉其他用例留下的全局 opener，保证这里验证的是本次 create_app 的效果
+    monkeypatch.setattr(urllib.request, "_opener", None)
+
+    served = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server 接口命名
+            served.set()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, format, *args):  # noqa: A002 - 基类签名
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        create_app(settings, gateway)
+        url = f"http://127.0.0.1:{server.server_port}/probe"
+        with urllib.request.urlopen(url, timeout=3) as response:
+            assert response.status == 200
+        assert served.is_set()
+    finally:
+        server.shutdown()
+        server.server_close()
