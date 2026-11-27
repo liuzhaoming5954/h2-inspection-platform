@@ -33,6 +33,7 @@
 - 修改 [`contracts/robot_gateway.proto`](contracts/robot_gateway.proto) 后，执行 `.venv/bin/python robot-gateway/generate_stubs.py`，把生成的 Python 代码和契约一起更新。涉及 HTTP 状态字段时，同时核对后端输出和 [`frontend/src/api.ts`](frontend/src/api.ts) 的类型。
 - 真机状态与遥控使用各自独立的 gRPC 和 SSH 通道。停步、释放优先于待发送的方向指令。修改遥控时核对松手停步、主动停步、释放控制权和断链后的会话行为。模拟模式下保持巡检与手动遥控互斥。SDK 回执表示运控服务已应答，实际停稳由现场观察确认。
 - 真机遥控的指令有效期使用 PC3 单调时钟。PC2 温湿度按原始采样年龄判断，从采样起最多显示 8 秒。同一采样重复读取时保留原有效截止时间，三机各自使用本机单调计时。
+- 预置演示路线定义在 [`backend/src/h2_backend/demo.py`](backend/src/h2_backend/demo.py) 的 `PRESET_ROUTES`，与演示话术放在同一处。后端启动时按路线名对齐本机数据库：没有就新增，内容不同以代码为准覆盖，预置路线不能删除。修改标准路线或话术后，每台上位机拉取代码并重启上位机栈才生效；其余路线是各机器的本地数据。
 
 ## 文档和提交范围
 

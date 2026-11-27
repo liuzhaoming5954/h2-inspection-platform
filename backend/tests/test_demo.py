@@ -9,6 +9,7 @@ import math
 import threading
 import time
 import types
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 import pytest
@@ -193,6 +194,87 @@ def test_route_crud_validation(client):
     assert client.post("/api/demo/routes", json=body).status_code == 409
     assert client.delete(f"/api/demo/routes/{route_id}").json()["ok"] is True
     assert client.delete(f"/api/demo/routes/{route_id}").status_code == 404
+
+
+# ---------- 预置演示路线（随代码同步，多台上位机执行同一条路线） ----------
+
+def start_with_local_routes(settings, gateway, rows):
+    """带着预先写入的路线记录启动应用，模拟一台已有本地数据的上位机。
+
+    返回 (routes, 写语句)：写语句是启动期间对数据库执行过的 INSERT/UPDATE。"""
+    from sqlalchemy import event
+    from h2_backend.app import create_app
+    from h2_backend.models import Base, DemoRoute
+    application = create_app(settings, gateway)
+    engine = application.state.service.engine
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    with application.state.service.sessions() as session:
+        for row in rows:
+            session.add(DemoRoute(id=row["id"], name=row["name"], steps=row["steps"],
+                                  created_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+        session.commit()
+    writes = []
+    event.listen(engine, "before_cursor_execute",
+                 lambda conn, cursor, statement, *args: writes.append(statement.lstrip().upper()))
+    with TestClient(application) as client:
+        routes = {route["id"]: route for route in client.get("/api/demo/routes").json()}
+    route_writes = [statement for statement in writes if "INTO DEMO_ROUTES" in statement
+                    or statement.startswith("UPDATE DEMO_ROUTES")]
+    return routes, route_writes
+
+
+def test_preset_demo_route_is_created_on_startup(client):
+    """全新数据库启动后就有预置演示路线，并被标为快捷按钮绑定的默认路线。"""
+    routes = client.get("/api/demo/routes").json()
+    preset = next(route for route in routes if route["name"] == "多点测试-12步")
+    assert preset["preset"] is True and preset["default"] is True
+    assert len(preset["steps"]) == 12
+    assert [step["task"] for step in preset["steps"] if step["type"] == "wait"] == ["led", "qr", "person"]
+    # 默认路线唯一；首次部署写入的种子路线不是预置
+    assert [route["name"] for route in routes if route["default"]] == ["多点测试-12步"]
+    single = next(route for route in routes if route["name"] == "单步测试")
+    assert single["preset"] is False and single["default"] is False
+
+
+def test_preset_demo_route_follows_code_when_local_copy_differs(settings, gateway):
+    """本机同名路线与代码不一致：启动时以代码为准覆盖，路线 id 不变，其他路线不受影响。"""
+    stale = {"id": "preset-local", "name": "多点测试-12步",
+             "steps": [{"type": "forward", "value": 1.0, "task": None}]}
+    own = {"id": "own-route", "name": "本机调试路线", "steps": [{"type": "turn", "value": 30}]}
+    routes, writes = start_with_local_routes(settings, gateway, [stale, own])
+
+    assert routes["preset-local"]["steps"] == demo_module.PRESET_ROUTES[0]["steps"]
+    assert routes["preset-local"]["preset"] is True and routes["preset-local"]["default"] is True
+    # SQLite 读回的时间不带时区后缀
+    assert routes["preset-local"]["created_at"] == "2026-01-01T00:00:00"
+    assert routes["own-route"]["steps"] == own["steps"] and routes["own-route"]["preset"] is False
+    # 只覆盖这一条，不新增也不碰别的路线
+    assert len(writes) == 1 and writes[0].startswith("UPDATE DEMO_ROUTES SET STEPS=?")
+
+
+def test_preset_demo_route_untouched_when_local_copy_matches(settings, gateway):
+    """本机同名路线与代码一致：启动时不写数据库，已验证过的本地路线原样保留。"""
+    same = {"id": "preset-local", "name": "多点测试-12步",
+            "steps": demo_module.PRESET_ROUTES[0]["steps"]}
+    routes, writes = start_with_local_routes(settings, gateway, [same])
+
+    assert writes == []
+    assert routes["preset-local"]["steps"] == same["steps"]
+    assert routes["preset-local"]["default"] is True
+
+
+def test_preset_demo_route_cannot_be_deleted_or_duplicated(client):
+    """预置路线不能删除（删了下次启动会写回），也不能用同名再建一条。"""
+    preset = next(route for route in client.get("/api/demo/routes").json() if route["default"])
+    reply = client.delete(f"/api/demo/routes/{preset['id']}")
+    assert reply.status_code == 409 and "不能删除" in reply.json()["detail"]
+    duplicate = client.post("/api/demo/routes", json={"name": preset["name"], "steps": preset["steps"]})
+    assert duplicate.status_code == 409
+    # 另存为别的名字不受影响（界面「编辑路线」的保存方式）
+    copy_body = {"name": "12步-本机试改", "steps": preset["steps"][:1]}
+    copied = client.post("/api/demo/routes", json=copy_body)
+    assert copied.status_code == 201 and copied.json()["preset"] is False
 
 
 # ---------- 执行器（模拟模式干跑路径） ----------

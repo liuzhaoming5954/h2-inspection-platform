@@ -28,7 +28,7 @@ onBeforeUnmount(() => { stopDemoPolling() })
       <span :class="['demo-phase-badge', phase]">{{ phaseNames[phase] ?? phase }}</span>
     </div>
     <select v-model="selectedId" class="demo-controls-select" data-testid="demo-route-select" aria-label="选择路线" :disabled="demoBusy || editing">
-      <option v-for="route in routes" :key="route.id" :value="route.id">{{ route.name }}（{{ route.steps.length }} 步）</option>
+      <option v-for="route in routes" :key="route.id" :value="route.id">{{ route.name }}（{{ route.steps.length }} 步）{{ route.preset ? ' · 预置' : '' }}</option>
     </select>
     <div class="demo-controls-buttons">
       <button v-if="props.hardware && !demoBusy" class="demo-prepare" type="button" data-testid="demo-prepare"
@@ -43,7 +43,8 @@ onBeforeUnmount(() => { stopDemoPolling() })
       <button class="demo-edit" type="button" data-testid="demo-edit" :disabled="demoBusy" @click="toggleEdit">{{ editing ? '收起编辑' : '✎ 编辑路线' }}</button>
     </div>
     <button v-if="selected && !demoBusy" type="button" class="demo-delete" data-testid="demo-delete"
-            :disabled="!!busy || editing" @click="deleteRoute">删除该路线</button>
+            :disabled="!!busy || editing || selected.preset" :title="selected.preset ? '预置演示路线随代码同步，不能删除' : ''"
+            @click="deleteRoute">删除该路线</button>
     <p v-if="message" class="demo-controls-message" role="status">{{ message }}</p>
 
     <!-- 执行进度：就绪检查灯与步骤列表跟随状态出现，主区不再重复展示 -->
@@ -104,7 +105,7 @@ onBeforeUnmount(() => { stopDemoPolling() })
   <div v-else class="demo-panel">
     <div class="demo-toolbar">
       <select v-model="selectedId" class="demo-select" data-testid="demo-route-select" aria-label="选择路线" :disabled="demoBusy || editing">
-        <option v-for="route in routes" :key="route.id" :value="route.id">{{ route.name }}（{{ route.steps.length }} 步）</option>
+        <option v-for="route in routes" :key="route.id" :value="route.id">{{ route.name }}（{{ route.steps.length }} 步）{{ route.preset ? ' · 预置' : '' }}</option>
       </select>
       <button v-if="props.hardware && !demoBusy" class="demo-prepare" type="button" data-testid="demo-prepare"
               :disabled="!!busy" @click="prepareDemo">⚙ 巡检准备</button>
@@ -172,7 +173,8 @@ onBeforeUnmount(() => { stopDemoPolling() })
 
     <div class="demo-ops">
       <button v-if="selected && !demoBusy" type="button" class="demo-delete" data-testid="demo-delete"
-              :disabled="!!busy || editing" @click="deleteRoute">删除该路线</button>
+              :disabled="!!busy || editing || selected.preset" :title="selected.preset ? '预置演示路线随代码同步，不能删除' : ''"
+              @click="deleteRoute">删除该路线</button>
     </div>
     <p v-if="message" class="demo-message" role="status">{{ message }}</p>
     <p v-if="!props.hardware" class="demo-hint">模拟模式：语音演示编排不可用，可用「手动执行」做执行器干跑。</p>

@@ -85,6 +85,9 @@ export interface DemoRoute {
   name: string
   steps: DemoStep[]
   created_at?: string
+  // preset：随代码同步的预置演示路线（不能删除）；default：状态带快捷按钮绑定的默认演示路线
+  preset?: boolean
+  default?: boolean
 }
 
 export interface DemoState {

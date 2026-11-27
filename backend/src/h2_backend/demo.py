@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import copy
+import logging
 import math
 import threading
 import time
@@ -63,6 +65,30 @@ SEED_ROUTES = [
                {"type": "turn", "value": -90},
                {"type": "forward", "value": 2.0}]},
 ]
+
+# 预置演示路线（2026-11-27）：随代码同步的标准路线，与上面的演示话术配套——
+# 每一步带的任务类型决定该站播报什么，所以路线和话术必须在同一个提交里。
+# 后端每次启动按路线名与数据库比对：没有就新增，内容不同以代码为准覆盖，
+# 使多台上位机（工作站、虚拟机）执行同一条路线。预置路线不能在界面删除；
+# 其余路线是各机器的本地数据，不随代码同步。
+# default=True 的是状态带「准备」「演示」快捷按钮绑定的默认演示路线。
+PRESET_ROUTES = [
+    {"name": "多点测试-12步", "default": True, "steps": [
+        {"type": "forward", "value": 2.0, "task": None},
+        {"type": "turn", "value": -90.0, "task": None},
+        {"type": "wait", "value": 10.0, "task": "led"},
+        {"type": "turn", "value": 90.0, "task": None},
+        {"type": "forward", "value": 2.0, "task": None},
+        {"type": "turn", "value": -90.0, "task": None},
+        {"type": "wait", "value": 10.0, "task": "qr"},
+        {"type": "turn", "value": 90.0, "task": None},
+        {"type": "forward", "value": 2.0, "task": None},
+        {"type": "turn", "value": -90.0, "task": None},
+        {"type": "wait", "value": 10.0, "task": "person"},
+        {"type": "turn", "value": 90.0, "task": None}]},
+]
+_PRESET_BY_NAME = {preset["name"]: preset for preset in PRESET_ROUTES}
+LOG = logging.getLogger(__name__)
 
 TTL_MS = 350                    # 与浏览器遥控一致的单帧有效期
 FRAME_INTERVAL = 0.1            # 巡航段指令节奏
@@ -429,12 +455,29 @@ class DemoService:
     # ---------- 路线存取 ----------
 
     def initialize(self) -> None:
-        """建表后注入预置路线（仅在表为空时）。"""
+        """建表后注入路线：预置路线仅在表为空时写入；随后把预置演示路线按名对齐数据库。"""
         with self._service.sessions() as session:
             if session.query(DemoRoute).count() == 0:
                 for seed in SEED_ROUTES:
-                    session.add(DemoRoute(id=str(uuid4()), name=seed["name"], steps=seed["steps"]))
-                session.commit()
+                    session.add(DemoRoute(id=str(uuid4()), name=seed["name"], steps=copy.deepcopy(seed["steps"])))
+            self._align_presets(session)
+            session.commit()
+
+    @staticmethod
+    def _align_presets(session: Any) -> None:
+        """预置演示路线以代码为准：没有就新增，内容不同就覆盖，已有的路线 id 保持不变。
+
+        覆盖会改动数据库里已有的记录，因此用警告级别留在日志里，便于事后核对
+        某台机器的路线是被哪次启动改掉的。"""
+        for preset in PRESET_ROUTES:
+            route = session.query(DemoRoute).filter(DemoRoute.name == preset["name"]).first()
+            if route is None:
+                session.add(DemoRoute(id=str(uuid4()), name=preset["name"],
+                                      steps=copy.deepcopy(preset["steps"])))
+                LOG.info("新增预置演示路线「%s」", preset["name"])
+            elif route.steps != preset["steps"]:
+                route.steps = copy.deepcopy(preset["steps"])
+                LOG.warning("预置演示路线「%s」与本机数据库内容不一致，已按代码覆盖", preset["name"])
 
     def list_routes(self) -> list[dict]:
         with self._service.sessions() as session:
@@ -442,7 +485,9 @@ class DemoService:
             return [self._route_dict(route) for route in routes]
 
     def _route_dict(self, route: DemoRoute) -> dict:
+        preset = _PRESET_BY_NAME.get(route.name)
         return {"id": route.id, "name": route.name, "steps": list(route.steps),
+                "preset": preset is not None, "default": bool(preset and preset.get("default")),
                 "created_at": route.created_at.isoformat() if route.created_at else None}
 
     def _load_route(self, route_id: str) -> dict:
@@ -467,6 +512,9 @@ class DemoService:
             route = session.get(DemoRoute, route_id)
             if route is None:
                 raise ServiceError(404, "路线不存在")
+            if route.name in _PRESET_BY_NAME:
+                # 删掉后下次启动会按代码重新写回，界面上直接拒绝以免误解。
+                raise ServiceError(409, "预置演示路线随代码同步，不能删除")
             session.delete(route)
             session.commit()
         return {"ok": True}

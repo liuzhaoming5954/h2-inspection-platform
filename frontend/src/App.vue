@@ -8,7 +8,7 @@ import TeleopPanel from './components/TeleopPanel.vue'
 import DemoPanel from './components/DemoPanel.vue'
 import LoginPage from './components/LoginPage.vue'
 import { errorMessage, request, type Report, type RobotState, type RoutePoint, type ServiceHealth, type Task } from './api'
-import { busy as demoBusyFlag, demoBusy, phase as demoPhase, prepareDemo, quickRoute, startDemo, stopDemo, QUICK_ROUTE_NAME } from './demoStore'
+import { busy as demoBusyFlag, demoBusy, phase as demoPhase, prepareDemo, quickRoute, startDemo, stopDemo } from './demoStore'
 
 const defaultPoints: RoutePoint[] = [
   { id: 'p01', label: 'A01机柜', x: -3, y: -1.8 },
@@ -705,13 +705,13 @@ onBeforeUnmount(() => {
             <template v-else>
               <button class="strip-btn" type="button" data-testid="strip-prepare"
                       :disabled="!quickRoute || !!demoBusyFlag || demoPhase === 'prepared'"
-                      :title="!quickRoute ? `未找到路线「${QUICK_ROUTE_NAME}」` : demoPhase === 'prepared' ? '已就绪' : ''"
+                      :title="!quickRoute ? '本机尚无默认演示路线：预置路线随代码同步，重启上位机后出现' : demoPhase === 'prepared' ? '已就绪' : ''"
                       @click="prepareDemo">
                 {{ demoBusyFlag === 'prepare' ? '准备中…' : '⚙ 准备' }}
               </button>
               <button class="strip-btn strip-start" type="button" data-testid="strip-demo-start"
                       :disabled="!quickRoute || !!demoBusyFlag || demoPhase !== 'prepared'"
-                      :title="!quickRoute ? `未找到路线「${QUICK_ROUTE_NAME}」` : demoPhase !== 'prepared' ? '请先点「准备」并等待就绪播报' : ''"
+                      :title="!quickRoute ? '本机尚无默认演示路线：预置路线随代码同步，重启上位机后出现' : demoPhase !== 'prepared' ? '请先点「准备」并等待就绪播报' : ''"
                       @click="quickRoute && startDemo(quickRoute.id)">⏻ 演示</button>
             </template>
             <!-- 退出登录：回到登录页。遥控会话或演示执行期间不可退出 -->

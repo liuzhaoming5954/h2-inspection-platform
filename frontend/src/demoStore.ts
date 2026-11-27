@@ -22,9 +22,9 @@ const draftSteps = ref<DraftStep[]>([])
 export { routes, selectedId, state, busy, message, editing, draftName, draftSteps }
 export const selected = computed(() => routes.value.find(route => route.id === selectedId.value) ?? null)
 
-// 状态带快捷按钮固定绑定的演示路线；按存储名精确匹配，找不到时按钮置灰。
-export const QUICK_ROUTE_NAME = '多点测试-12步'
-export const quickRoute = computed(() => routes.value.find(route => route.name === QUICK_ROUTE_NAME) ?? null)
+// 状态带快捷按钮绑定的默认演示路线：由后端按预置定义打标（demo.py 的 PRESET_ROUTES），
+// 前端不写死路线名。本机尚未同步到预置路线时按钮置灰。
+export const quickRoute = computed(() => routes.value.find(route => route.default) ?? null)
 export const phase = computed(() => state.value?.phase ?? 'idle')
 // 「已就绪」不算忙：准备成功的瞬间必须亮出巡检演示按钮（2026-11-21 现场
 // 反馈的缺陷：prepared 误入 busy 集合导致按钮在应亮起时反而消失）
