@@ -1,6 +1,7 @@
 """使用命令替身验证一键启动的转发检查和上位机停启。"""
 
 import os
+import pty
 from pathlib import Path
 import shlex
 import subprocess
@@ -73,7 +74,9 @@ printf '%s\\n' "$*" >> "$TEST_WORKSTATION_CALLS"
 [[ "$TEST_ALLOW_WORKSTATION" == 1 ]] || exit 97
 [[ $(<"$TEST_PROBE_CALLS") == $'15051\\n15052' ]] || exit 96
 case "$*" in
-  'scripts/dev.py stop'|'scripts/dev.py start '*) exit 0 ;;
+  'scripts/dev.py stop') exit 0 ;;
+  # 记录上位机后端实际拿到的现场密码（未设置记为 <unset>）
+  'scripts/dev.py start '*) printf '%s\\n' "${H2_FIELD_PASSWORD-<unset>}" >> "$TEST_WORKSTATION_PASSWORDS"; exit 0 ;;
   'scripts/dev.py status') printf '%s\\n' stopped ;;
   'scripts/h2_field_check.py') grep -q '^scripts/dev.py start ' "$TEST_WORKSTATION_CALLS" ;;
   *) exit 98 ;;
@@ -106,37 +109,57 @@ class GatewayClient:
 """)
     workstation_calls = tmp_path / "workstation-calls"
     probe_calls = tmp_path / "probe-calls"
+    workstation_passwords = tmp_path / "workstation-passwords"
 
-    def run(*args, failure="", failed_port=0, allow_workstation=False, sensor_settings=None):
-        result = subprocess.run(
-            ["/bin/bash", str(copied_script), *args],
-            env={
-                "PATH": f"{bin_dir}:/usr/bin:/bin",
-                "H2_PC2_HOST": "127.0.0.1",
-                "H2_PC3_HOST": "127.0.0.1",
-                "H2_FIELD_PASSWORD": "fixture",
-                "TEST_FAILURE": failure,
-                "TEST_FAILED_PORT": str(failed_port),
-                "TEST_LAST_PORT": str(tmp_path / "last-port"),
-                "TEST_PROCESS_PID": str(os.getpid()),
-                "TEST_PARENT_PID": str(os.getppid()),
-                "TEST_PYTHON": sys.executable,
-                "TEST_PROBE_CALLS": str(probe_calls),
-                "TEST_ALLOW_WORKSTATION": "1" if allow_workstation else "0",
-                "TEST_WORKSTATION_CALLS": str(workstation_calls),
-                "TEST_START_COMPONENTS": "1" if sensor_settings else "0",
-                "TEST_SENSOR_CALLS": str(tmp_path / "sensor-calls"),
-                **(sensor_settings or {}),
-            },
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+    def run(*args, failure="", failed_port=0, allow_workstation=False, sensor_settings=None,
+            password="fixture", typed_password=None):
+        """password：环境变量里的密码（None 表示不设置）。
+        typed_password：设置后经由伪终端输入密码，模拟操作员在终端提示下输入。"""
+        stdin = None
+        master = slave = None
+        if typed_password is not None:
+            # 脚本用 [ -t 0 ] 判断是否在终端运行；伪终端让交互输入路径成立
+            master, slave = pty.openpty()
+            os.write(master, f"{typed_password}\n".encode())
+            stdin = slave
+        environment = {
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "H2_PC2_HOST": "127.0.0.1",
+            "H2_PC3_HOST": "127.0.0.1",
+            "TEST_FAILURE": failure,
+            "TEST_FAILED_PORT": str(failed_port),
+            "TEST_LAST_PORT": str(tmp_path / "last-port"),
+            "TEST_PROCESS_PID": str(os.getpid()),
+            "TEST_PARENT_PID": str(os.getppid()),
+            "TEST_PYTHON": sys.executable,
+            "TEST_PROBE_CALLS": str(probe_calls),
+            "TEST_ALLOW_WORKSTATION": "1" if allow_workstation else "0",
+            "TEST_WORKSTATION_CALLS": str(workstation_calls),
+            "TEST_WORKSTATION_PASSWORDS": str(workstation_passwords),
+            "TEST_START_COMPONENTS": "1" if sensor_settings else "0",
+            "TEST_SENSOR_CALLS": str(tmp_path / "sensor-calls"),
+            **(sensor_settings or {}),
+        }
+        if password is not None:
+            environment["H2_FIELD_PASSWORD"] = password
+        try:
+            result = subprocess.run(
+                ["/bin/bash", str(copied_script), *args],
+                env=environment, stdin=stdin,
+                capture_output=True, text=True, timeout=5,
+            )
+        finally:
+            for fd in (slave, master):
+                if fd is not None:
+                    os.close(fd)
         calls = workstation_calls.read_text().splitlines() if workstation_calls.exists() else []
         if not allow_workstation:
             assert calls == []
         probes = probe_calls.read_text().splitlines() if probe_calls.exists() else []
-        return result, probes, calls
+        # 上位机后端每次启动时拿到的现场密码
+        passwords = (workstation_passwords.read_text().splitlines()
+                     if workstation_passwords.exists() else [])
+        return result, probes, calls, passwords
 
     return run
 
@@ -144,27 +167,27 @@ class GatewayClient:
 @pytest.mark.parametrize("local_port,remote_port", [(15051, 50051), (15052, 50052)])
 @pytest.mark.parametrize("args", [(), ("--robot-only",)])
 def test_forward_failure_leaves_workstation_alone(field_start, local_port, remote_port, args):
-    result, probes, _ = field_start(*args, failure="ssh", failed_port=local_port)
+    result, probes, _, _ = field_start(*args, failure="ssh", failed_port=local_port)
     assert result.returncode == 1, result
     assert f"NOT READY: SSH forward {local_port}:{remote_port} failed." in result.stderr
     assert probes == []
 
 
 def test_forward_listeners_with_unreachable_gateway_leave_workstation_alone(field_start):
-    result, probes, _ = field_start(failure="probe", failed_port=15052)
+    result, probes, _, _ = field_start(failure="probe", failed_port=15052)
     assert result.returncode == 1, result
     assert "NOT READY: gRPC GetState failed through SSH forward 15052:50052" in result.stderr
     assert probes == ["15051", "15052"]
 
 
 def test_robot_only_accepts_a_reachable_gateway_before_h2_is_ready(field_start):
-    result, probes, _ = field_start("--robot-only")
+    result, probes, _, _ = field_start("--robot-only")
     assert result.returncode == 0, result
     assert probes == ["15051", "15052"]
 
 
 def test_full_start_restarts_workstation_once_after_both_forward_checks(field_start):
-    result, probes, calls = field_start(allow_workstation=True)
+    result, probes, calls, _ = field_start(allow_workstation=True)
     assert result.returncode == 0, result
     assert "READY: open http://127.0.0.1:5173" in result.stdout
     assert probes == ["15051", "15052"]
@@ -175,13 +198,29 @@ def test_full_start_restarts_workstation_once_after_both_forward_checks(field_st
     ]
 
 
+def test_full_start_passes_environment_password_to_workstation(field_start):
+    """密码来自环境变量：上位机后端原样拿到它（链路恢复按钮与巡检准备靠它远程操作）。"""
+    result, _, _, passwords = field_start(allow_workstation=True)
+    assert result.returncode == 0, result
+    assert passwords == ["fixture"]
+
+
+def test_full_start_passes_prompted_password_to_workstation(field_start):
+    """密码来自终端输入：过去它只是脚本内的普通变量，后端继承不到，表现为链路正常
+    但「巡检准备」报「H2_FIELD_PASSWORD 未设置」（2026-11-27 现场）。现在同样传给后端。"""
+    result, _, _, passwords = field_start(allow_workstation=True, password=None,
+                                          typed_password="typed-secret")
+    assert result.returncode == 0, result
+    assert passwords == ["typed-secret"]
+
+
 @pytest.mark.parametrize("override_url", [None, "http://pc2-private.example:8090/environment?name='h2'&lane=pc3"])
 def test_one_click_passes_configured_sensor_addresses(field_start, tmp_path, override_url):
     settings = {"H2_PC2_HOST": "10.42.8.22", "H2_PC2_BIND": "10.42.9.22", "H2_PC3_HOST": "10.42.8.23"}
     if override_url is not None:
         settings["H2_SENSOR_AGENT_URL"] = override_url
 
-    result, probes, _ = field_start("--robot-only", sensor_settings=settings)
+    result, probes, _, _ = field_start("--robot-only", sensor_settings=settings)
     assert result.returncode == 0, result
     assert probes == ["15051", "15052"]
     monitor_url, pc2_host, pc2_command, pc3_host, pc3_command = (tmp_path / "sensor-calls").read_text().splitlines()

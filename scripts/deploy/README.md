@@ -101,5 +101,6 @@ export H2_FIELD_PASSWORD
 ## 故障排查
 
 - 页面链路灯全红、PC2/PC3 ping 得通 → 多半是 `H2_FIELD_PASSWORD` 未设或转发进程残留，点「重连转发」
+- 链路正常，但点「准备」机器人没反应，侧栏演示卡显示「准备失败：H2_FIELD_PASSWORD 未设置」→ 上位机后端进程没拿到 SSH 密码（链路恢复按钮同样会失败）。用 `scripts/h2_field_start.sh` 重启一次即可：脚本现在会把终端输入的密码一并传给后端，2026-11-27 之前直接运行脚本并手动输入密码时，密码只用于脚本自身的 SSH，不会传给后端
 - 只 PC3 网关红灯 → 在工作站 `ssh unitree@$H2_PC3_HOST 'tail -20 ~/h2-inspection-platform/gateway.log'` 看网关日志
 - 遥控就绪但温湿度空 → PC2 代理灯是否绿；绿则查 `~/sensor_agent.log`

@@ -7,6 +7,7 @@
 # 已在运行的组件继续复用。
 #
 # 从 H2_FIELD_PASSWORD 读取 SSH 密码，终端交互运行时也可提示输入一次。
+# 两种来源的密码都会导出给上位机后端（链路恢复按钮与巡检准备要靠它远程操作）。
 # 机器人密码应保存在现场机器上。
 # 升级前，先将新版 PC2 脚本部署到 ~/sensor_agent.py，并停止 PC2 和 PC3 的旧进程。
 # 详见 robot-gateway/H2_COMMISSIONING.md。
@@ -144,6 +145,10 @@ if [ "$(.venv/bin/python scripts/dev.py status)" != stopped ]; then
   echo "NOT READY: old workstation stack is still running. Check .runtime/logs/dev-supervisor.log."
   exit 1
 fi
+# 上位机后端靠 H2_FIELD_PASSWORD 执行现场远程操作（链路恢复按钮、巡检准备）。
+# 密码来自终端输入时 PASS 只是普通 shell 变量，后端继承不到，会出现链路正常
+# 但「准备」报「H2_FIELD_PASSWORD 未设置」。统一导出，两种来源行为一致。
+export H2_FIELD_PASSWORD="$PASS"
 nohup .venv/bin/python scripts/dev.py start --external-gateway 127.0.0.1:15051 \
   --external-teleop-gateway 127.0.0.1:15052 \
   >>"$LOG_DIR/dev-supervisor.log" 2>&1 &
