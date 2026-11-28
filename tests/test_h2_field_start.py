@@ -78,7 +78,8 @@ case "$*" in
   # 记录上位机后端实际拿到的现场密码（未设置记为 <unset>）
   'scripts/dev.py start '*) printf '%s\\n' "${H2_FIELD_PASSWORD-<unset>}" >> "$TEST_WORKSTATION_PASSWORDS"; exit 0 ;;
   'scripts/dev.py status') printf '%s\\n' stopped ;;
-  'scripts/h2_field_check.py') grep -q '^scripts/dev.py start ' "$TEST_WORKSTATION_CALLS" ;;
+  # 自检替身：TEST_SELF_CHECK=fail 模拟机器人未进入运控就绪（真机上是 h2_field_check 返回非零）
+  'scripts/h2_field_check.py') grep -q '^scripts/dev.py start ' "$TEST_WORKSTATION_CALLS" && [[ "$TEST_SELF_CHECK" != fail ]] ;;
   *) exit 98 ;;
 esac
 """)
@@ -112,7 +113,7 @@ class GatewayClient:
     workstation_passwords = tmp_path / "workstation-passwords"
 
     def run(*args, failure="", failed_port=0, allow_workstation=False, sensor_settings=None,
-            password="fixture", typed_password=None):
+            password="fixture", typed_password=None, self_check="pass"):
         """password：环境变量里的密码（None 表示不设置）。
         typed_password：设置后经由伪终端输入密码，模拟操作员在终端提示下输入。"""
         stdin = None
@@ -137,6 +138,7 @@ class GatewayClient:
             "TEST_WORKSTATION_CALLS": str(workstation_calls),
             "TEST_WORKSTATION_PASSWORDS": str(workstation_passwords),
             "TEST_START_COMPONENTS": "1" if sensor_settings else "0",
+            "TEST_SELF_CHECK": self_check,
             "TEST_SENSOR_CALLS": str(tmp_path / "sensor-calls"),
             **(sensor_settings or {}),
         }
@@ -189,13 +191,29 @@ def test_robot_only_accepts_a_reachable_gateway_before_h2_is_ready(field_start):
 def test_full_start_restarts_workstation_once_after_both_forward_checks(field_start):
     result, probes, calls, _ = field_start(allow_workstation=True)
     assert result.returncode == 0, result
-    assert "READY: open http://127.0.0.1:5173" in result.stdout
+    assert "READY: hardware ready, teleoperation unlocked." in result.stdout
+    assert "上位机页面：请在本机浏览器打开 http://127.0.0.1:5173" in result.stdout
     assert probes == ["15051", "15052"]
     assert [call for call in calls if call != "scripts/dev.py status"] == [
         "scripts/dev.py stop",
         "scripts/dev.py start --external-gateway 127.0.0.1:15051 --external-teleop-gateway 127.0.0.1:15052",
         "scripts/h2_field_check.py",
     ]
+
+
+def test_page_address_is_shown_even_when_self_check_fails(field_start):
+    """机器人未进入运控就绪时自检失败，但上位机与链路已经起来：
+    脚本要以非零退出提醒现场，同时仍然给出页面地址（2026-11-28 现场反馈，
+    自检不过时原来直接退出，操作员看不到该打开哪个网址）。"""
+    result, probes, calls, _ = field_start(allow_workstation=True, self_check="fail")
+    assert result.returncode == 1, result
+    assert "NOT READY: fix the issues above before touching the robot." in result.stdout
+    last_line = result.stdout.strip().splitlines()[-1]
+    assert "http://127.0.0.1:5173" in last_line, last_line
+    # 失败只影响自检结论，不回滚已经拉起的现场链路与上位机
+    assert probes == ["15051", "15052"]
+    assert "scripts/dev.py start --external-gateway 127.0.0.1:15051 --external-teleop-gateway 127.0.0.1:15052" in calls
+    assert all("dev.py stop" not in call or i == 0 for i, call in enumerate(calls) if "dev.py" in call)
 
 
 def test_full_start_passes_environment_password_to_workstation(field_start):

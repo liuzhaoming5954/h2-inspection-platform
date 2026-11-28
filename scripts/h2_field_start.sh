@@ -169,9 +169,18 @@ fi
 echo
 
 echo "== self-check: teleop lease, heartbeat, release (no motion) =="
+READY=0
 if .venv/bin/python scripts/h2_field_check.py; then
-  echo "READY: open http://127.0.0.1:5173 and start teleoperation."
+  echo "READY: hardware ready, teleoperation unlocked."
 else
+  # 自检不过多半是运控还没就绪（未进入 601），上位机与链路本身已经可用，
+  # 页面照常打开；机器人就绪后刷新页面或重新运行本脚本即可。
   echo "NOT READY: fix the issues above before touching the robot."
-  exit 1
+  READY=1
 fi
+
+# 无论自检是否通过，最后都单独一行给出页面地址：
+# 上位机已在本机 127.0.0.1 上监听，机器人就绪后刷新页面即可继续。
+echo
+echo "上位机页面：请在本机浏览器打开 http://127.0.0.1:5173   （接口文档 http://127.0.0.1:8000/docs）"
+exit "$READY"
