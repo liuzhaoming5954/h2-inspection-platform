@@ -43,6 +43,28 @@ bash scripts/deploy/setup_workstation.sh
 
 脚本使用项目的 Python 锁定依赖和前端锁文件，安装本仓库的 `h2_backend` 和 `h2_gateway`，检查 Python 依赖和模块导入后生成 `~/h2-start.sh`。启动脚本继承当前终端的配置。
 
+#### 现场专机：一键免密启动
+
+上位机是现场专机时，可以把机器人 PC 的 SSH 密码写进本机的 `~/h2-start.sh`，运行脚本即可完成 PC2 代理、PC3 网关、双转发和上位机的全部启动，中途不再提示输入。密码只写入该脚本（权限 700），不进仓库：
+
+```bash
+bash scripts/deploy/setup_workstation.sh --robot-password <PC2/PC3 的 SSH 密码> --robot-link <面向机器人的网口>
+```
+
+上位机若用两个网口分别连局域网和机器人，且两个网口同在 `192.168.124.0/24`（例如内置网口 `.10` 直连机器人、USB 网卡 `.12` 连局域网），内核会按 metric 选路，发往机器人的包可能走错网口，表现为这台机器自己 ping 不通 PC2、PC3。生成的启动脚本每次运行前会把 PC2、PC3 的主机路由固定到 `--robot-link` 指定的网口；该操作需要 root，所以要先安装一条只放行这两条路由命令的 sudoers 规则：
+
+```bash
+sudo bash scripts/deploy/install-robot-route-sudoers.sh <面向机器人的网口> <该网口的 IPv4 地址>
+```
+
+规则只允许 `ip route replace <机器人地址>/32 dev <网口> src <本机地址>`，不授予其他权限。没有安装时启动脚本会在路由这一步报错并停止，不会带着错误路由继续启动。
+
+首次在这台机器上连接机器人前，要先把 PC2、PC3 的 SSH 主机密钥登记进 `~/.ssh/known_hosts`（启动脚本使用严格主机校验，全新系统上没有记录会报 `No ED25519 host key is known`）。在该机器上执行并核对指纹后保存：
+
+```bash
+ssh-keyscan 192.168.124.162 192.168.124.163 >> ~/.ssh/known_hosts
+```
+
 ### PC3 建图（FastLIO2 容器）
 
 PC3 另运行 noetic 容器做 FastLIO2 实时建图（只建图不导航，对 `~/fastlio2_ros1_g1` 源码零改动），点云/位姿/轨迹经 PC3:8097 数据桥供上位机「地图显示」模块渲染。镜像构建、离线部署、启动命令与排障见 [scripts/fastlio/README.md](../fastlio/README.md)。
@@ -103,6 +125,9 @@ export H2_FIELD_PASSWORD
 ## 故障排查
 
 - 页面链路灯全红、PC2/PC3 ping 得通 → 多半是 `H2_FIELD_PASSWORD` 未设或转发进程残留，点「重连转发」
+- 启动脚本每一步都报 `No ED25519 host key is known` / `Host key verification failed` → 这台上位机第一次连接机器人，按上面「一键免密启动」登记主机密钥
+- 这台机器自己 ping 不通 PC2、PC3，但两个网口都是 UP、地址也对 → 双网口同网段选错出口，见上面「一键免密启动」的主机路由；用 `ip route get 192.168.124.163` 看实际走哪个网口
+- `一键启动` 报「无法把 … 指向网口 …（需要 sudo 免密执行 ip route）」→ 没装 sudoers 规则，执行 `sudo bash scripts/deploy/install-robot-route-sudoers.sh …`
 - 链路正常，但点「准备」机器人没反应，侧栏演示卡显示「准备失败：H2_FIELD_PASSWORD 未设置」→ 上位机后端进程没拿到 SSH 密码（链路恢复按钮同样会失败）。用 `scripts/h2_field_start.sh` 重启一次即可：脚本现在会把终端输入的密码一并传给后端，2026-11-27 之前直接运行脚本并手动输入密码时，密码只用于脚本自身的 SSH，不会传给后端
 - 链路正常，页面却持续报「服务响应超时」、状态显示未连接，「申请控制权」不可点，同时语音播报、转写、相机画面都没有反应 → 上位机后端继承了启动终端的代理变量（`http_proxy` 等），发往 PC2/PC3 的请求被送进本机代理、等到超时才失败，还占满了浏览器的并发连接。上位机栈现在启动时会剔除代理变量，后端自身也不再使用代理；2026-11-27 之前需要清掉代理变量后重启上位机栈
 - 只 PC3 网关红灯 → 在工作站 `ssh unitree@$H2_PC3_HOST 'tail -20 ~/h2-inspection-platform/gateway.log'` 看网关日志
